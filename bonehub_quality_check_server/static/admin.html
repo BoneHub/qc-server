@@ -1,0 +1,545 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BoneHub Quality Check &middot; Admin</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #dcdfe4;
+    --text: #16191d;
+    --muted: #666d78;
+    --accent: #1e6bb8;
+    --accent-text: #ffffff;
+    --danger: #b3261e;
+    --ok: #1b7f4b;
+    --warn: #8a6100;
+    --code-bg: #f0f2f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --panel: #1e2126;
+      --border: #343941;
+      --text: #e6e8ea;
+      --muted: #99a1ad;
+      --accent: #4c9be8;
+      --accent-text: #0d1117;
+      --danger: #f2837c;
+      --ok: #63cd98;
+      --warn: #e0b24d;
+      --code-bg: #262a30;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px 16px 64px;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+  button {
+    font: inherit;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select {
+    font: inherit;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    min-width: 0;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+  .scroll { overflow-x: auto; }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+  .stat .n { font-size: 24px; font-weight: 600; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1 1 160px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
+  .pill.assigned { color: var(--accent); }
+  .pill.confirmed { color: var(--ok); }
+  .pill.rejected { color: var(--danger); }
+  .pill.expired, .pill.released { color: var(--muted); }
+  .banner { padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid var(--border); }
+  .banner.err { color: var(--danger); border-color: var(--danger); }
+  .banner.ok { color: var(--ok); border-color: var(--ok); }
+  .keybox { background: var(--code-bg); border: 1px solid var(--warn); border-radius: 6px; padding: 12px; margin-top: 12px; }
+  .keybox .k { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; user-select: all; }
+  .muted { color: var(--muted); }
+  .right { text-align: right; }
+  .nowrap { white-space: nowrap; }
+  #login { max-width: 420px; margin: 60px auto; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ------------------------------------------------------------ login -->
+  <section id="login">
+    <h1>BoneHub Quality Check</h1>
+    <p class="sub">Enter the server admin key to continue.</p>
+    <div id="loginError" class="banner err" hidden></div>
+    <label for="adminKey">Admin key</label>
+    <div class="row">
+      <div><input id="adminKey" type="password" placeholder="bhqc_..." autocomplete="off" style="width:100%"></div>
+      <button class="primary" id="loginBtn">Sign in</button>
+    </div>
+    <p class="muted" style="margin-bottom:0">
+      The key is printed on first start and stored in
+      <code>&lt;dataset&gt;/.bonehub_qc/admin_key</code>.
+    </p>
+  </section>
+
+  <!-- ------------------------------------------------------------- panel -->
+  <div id="panel" hidden>
+    <div class="row" style="margin-bottom:16px">
+      <div>
+        <h1>BoneHub Quality Check</h1>
+        <p class="sub mono" id="datasetRoot" style="margin:0"></p>
+      </div>
+      <button id="refreshBtn">Refresh</button>
+      <button id="reindexBtn">Re-scan dataset</button>
+      <button id="logoutBtn">Sign out</button>
+    </div>
+
+    <div id="globalError" class="banner err" hidden></div>
+
+    <section>
+      <h2>Queue</h2>
+      <div class="grid" id="stats"></div>
+      <p class="muted" id="indexedAt" style="margin:12px 0 0"></p>
+    </section>
+
+    <section>
+      <h2>Create reviewer</h2>
+      <div class="row">
+        <div>
+          <label for="newName">Name</label>
+          <input id="newName" placeholder="alice" style="width:100%">
+        </div>
+        <div>
+          <label for="newDatasets">Dataset ids (optional)</label>
+          <input id="newDatasets" placeholder="1,3,10 — blank means all" style="width:100%">
+        </div>
+        <div>
+          <label for="newNote">Note (optional)</label>
+          <input id="newNote" placeholder="radiology resident" style="width:100%">
+        </div>
+        <button class="primary" id="createBtn">Create &amp; issue key</button>
+      </div>
+      <div id="newKeyBox" class="keybox" hidden>
+        <strong>API key for <span id="newKeyName"></span></strong>
+        <div class="k" id="newKeyValue"></div>
+        <p class="muted" style="margin:8px 0 0">
+          Shown once only. Copy it now and give it to the reviewer for the 3D Slicer extension.
+        </p>
+      </div>
+    </section>
+
+    <section>
+      <h2>Reviewers</h2>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Name</th><th>Key</th><th>Status</th><th class="right">Open</th>
+          <th class="right">Confirmed</th><th class="right">Rejected</th><th>Datasets</th><th>Note</th><th></th>
+        </tr></thead>
+        <tbody id="usersBody"></tbody>
+      </table></div>
+    </section>
+
+    <section>
+      <h2>Assignments</h2>
+      <div class="row" style="margin-bottom:12px">
+        <div style="flex:0 0 auto">
+          <label for="stateFilter">State</label>
+          <select id="stateFilter">
+            <option value="">all</option>
+            <option value="assigned">assigned</option>
+            <option value="confirmed">confirmed</option>
+            <option value="rejected">rejected</option>
+            <option value="released">released</option>
+            <option value="expired">expired</option>
+          </select>
+        </div>
+      </div>
+      <div class="scroll"><table>
+        <thead><tr>
+          <th>Subject</th><th>Reviewer</th><th>State</th><th>Assigned</th>
+          <th>Submitted</th><th>Confirmed labels</th><th></th>
+        </tr></thead>
+        <tbody id="assignBody"></tbody>
+      </table></div>
+    </section>
+
+    <section>
+      <h2>Recent activity</h2>
+      <div class="scroll"><table>
+        <thead><tr><th>Time</th><th>Kind</th><th>Subject</th><th>User</th><th>Detail</th></tr></thead>
+        <tbody id="logBody"></tbody>
+      </table></div>
+    </section>
+
+    <section>
+      <h2>Policy</h2>
+      <div class="row">
+        <div>
+          <label for="cfgEligible">Eligible label values</label>
+          <input id="cfgEligible" placeholder="2" style="width:100%">
+        </div>
+        <div>
+          <label for="cfgLease">Lease TTL (seconds)</label>
+          <input id="cfgLease" type="number" min="60" style="width:100%">
+        </div>
+        <div>
+          <label for="cfgMax">Max subjects per reviewer</label>
+          <input id="cfgMax" type="number" min="1" style="width:100%">
+        </div>
+        <div>
+          <label for="cfgStrategy">Assignment strategy</label>
+          <select id="cfgStrategy" style="width:100%">
+            <option value="sequential">sequential</option>
+            <option value="random">random</option>
+          </select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div><label><input type="checkbox" id="cfgNoSeg"> Queue subjects without segmentation</label></div>
+        <div><label><input type="checkbox" id="cfgRequeue"> Re-queue rejected subjects</label></div>
+        <div><label><input type="checkbox" id="cfgGeometry"> Require geometry match</label></div>
+        <div><label><input type="checkbox" id="cfgBackups"> Keep segmentation backups</label></div>
+        <button class="primary" id="saveCfgBtn">Save policy</button>
+      </div>
+      <div id="cfgMsg" class="banner ok" hidden style="margin:12px 0 0"></div>
+    </section>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var KEY_STORAGE = "bonehub_qc_admin_key";
+  var adminKey = null;
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  // --- transport ------------------------------------------------------------
+  function api(method, path, body) {
+    var opts = { method: method, headers: { "X-Admin-Key": adminKey, "Accept": "application/json" } };
+    if (body !== undefined) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    return fetch(path, opts).then(function (response) {
+      return response.text().then(function (text) {
+        var data = null;
+        try { data = text ? JSON.parse(text) : null; } catch (e) { data = { detail: text }; }
+        if (!response.ok) {
+          var detail = data && data.detail ? data.detail : ("HTTP " + response.status);
+          var err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+          err.status = response.status;
+          throw err;
+        }
+        return data;
+      });
+    });
+  }
+
+  function showError(message) {
+    var box = $("globalError");
+    box.textContent = message;
+    box.hidden = false;
+    window.setTimeout(function () { box.hidden = true; }, 8000);
+  }
+
+  function esc(value) {
+    if (value === null || value === undefined) { return ""; }
+    return String(value).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function shortTime(iso) {
+    if (!iso) { return "—"; }
+    return String(iso).replace("T", " ").replace("Z", "");
+  }
+
+  // --- login ----------------------------------------------------------------
+  function signIn(key) {
+    adminKey = key;
+    return api("GET", "/admin/api/session").then(function (session) {
+      try { window.sessionStorage.setItem(KEY_STORAGE, key); } catch (e) { /* private mode */ }
+      $("login").hidden = true;
+      $("panel").hidden = false;
+      $("datasetRoot").textContent = session.dataset_root;
+      fillConfig(session.config);
+      return refreshAll();
+    });
+  }
+
+  $("loginBtn").addEventListener("click", function () {
+    var key = $("adminKey").value.trim();
+    if (!key) { return; }
+    $("loginError").hidden = true;
+    signIn(key)["catch"](function (err) {
+      adminKey = null;
+      $("loginError").textContent = err.message;
+      $("loginError").hidden = false;
+    });
+  });
+
+  $("adminKey").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") { $("loginBtn").click(); }
+  });
+
+  $("logoutBtn").addEventListener("click", function () {
+    try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
+    window.location.reload();
+  });
+
+  // --- rendering ------------------------------------------------------------
+  function renderStats(stats) {
+    var cells = [
+      ["Eligible", stats.eligible_subjects],
+      ["Available", stats.available],
+      ["Assigned", stats.assigned],
+      ["Confirmed", stats.confirmed],
+      ["Rejected", stats.rejected],
+      ["Subjects total", stats.total_subjects]
+    ];
+    $("stats").innerHTML = cells.map(function (c) {
+      return '<div class="stat"><div class="n">' + esc(c[1]) + '</div><div class="k">' + esc(c[0]) + "</div></div>";
+    }).join("");
+
+    var perDataset = Object.keys(stats.datasets || {}).map(function (id) {
+      return "Dataset " + id + ": " + stats.datasets[id];
+    }).join(" · ");
+    $("indexedAt").textContent =
+      "Indexed " + shortTime(stats.index_built_at) + (perDataset ? " — " + perDataset : "");
+  }
+
+  function renderUsers(users) {
+    if (!users.length) {
+      $("usersBody").innerHTML = '<tr><td colspan="9" class="muted">No reviewers yet.</td></tr>';
+      return;
+    }
+    $("usersBody").innerHTML = users.map(function (u) {
+      var datasets = u.allowed_dataset_ids === null ? "all" : u.allowed_dataset_ids.join(", ");
+      return "<tr>" +
+        "<td>" + esc(u.name) + "</td>" +
+        '<td class="mono">' + esc(u.key_prefix) + "…</td>" +
+        '<td><span class="pill ' + (u.active ? "confirmed" : "expired") + '">' +
+          (u.active ? "active" : "disabled") + "</span></td>" +
+        '<td class="right">' + esc(u.open) + "</td>" +
+        '<td class="right">' + esc(u.confirmed) + "</td>" +
+        '<td class="right">' + esc(u.rejected) + "</td>" +
+        "<td>" + esc(datasets) + "</td>" +
+        '<td class="muted">' + esc(u.note) + "</td>" +
+        '<td class="nowrap right">' +
+          '<button data-act="rotate" data-name="' + esc(u.name) + '">New key</button> ' +
+          '<button data-act="toggle" data-name="' + esc(u.name) + '" data-active="' + (!u.active) + '">' +
+            (u.active ? "Disable" : "Enable") + "</button> " +
+          '<button class="danger" data-act="delete" data-name="' + esc(u.name) + '">Delete</button>' +
+        "</td></tr>";
+    }).join("");
+  }
+
+  function renderAssignments(rows) {
+    if (!rows.length) {
+      $("assignBody").innerHTML = '<tr><td colspan="7" class="muted">Nothing yet.</td></tr>';
+      return;
+    }
+    $("assignBody").innerHTML = rows.map(function (a) {
+      var labels = (a.confirmed_labels || []).join(", ");
+      return "<tr>" +
+        '<td class="mono">' + esc(a.subject_key) + "</td>" +
+        "<td>" + esc(a.user) + "</td>" +
+        '<td><span class="pill ' + esc(a.state) + '">' + esc(a.state) + "</span></td>" +
+        '<td class="nowrap muted">' + esc(shortTime(a.assigned_at)) + "</td>" +
+        '<td class="nowrap muted">' + esc(shortTime(a.submitted_at)) + "</td>" +
+        '<td class="muted">' + esc(labels) + "</td>" +
+        '<td class="right">' + (a.state === "assigned"
+          ? '<button data-act="release" data-id="' + esc(a.assignment_id) + '">Release</button>'
+          : "") + "</td></tr>";
+    }).join("");
+  }
+
+  function renderLog(entries) {
+    if (!entries.length) {
+      $("logBody").innerHTML = '<tr><td colspan="5" class="muted">No activity yet.</td></tr>';
+      return;
+    }
+    $("logBody").innerHTML = entries.map(function (e) {
+      var detail = "";
+      if (e.kind === "submission") {
+        detail = e.quality_check_confirmed
+          ? "confirmed → " + Object.keys(e.updated_labels || {}).join(", ")
+          : "rejected, dataset unchanged";
+        if (e.comment) { detail += " — " + e.comment; }
+      } else if (e.kind === "assigned") {
+        detail = "lease until " + shortTime(e.expires_at);
+      } else if (e.key_prefix) {
+        detail = e.key_prefix + "…";
+      }
+      return "<tr>" +
+        '<td class="nowrap muted">' + esc(shortTime(e.timestamp)) + "</td>" +
+        "<td>" + esc(e.kind) + "</td>" +
+        '<td class="mono">' + esc(e.subject_key || "") + "</td>" +
+        "<td>" + esc(e.user || "") + "</td>" +
+        '<td class="muted">' + esc(detail) + "</td></tr>";
+    }).join("");
+  }
+
+  function fillConfig(cfg) {
+    $("cfgEligible").value = (cfg.eligible_label_values || []).join(",");
+    $("cfgLease").value = cfg.lease_ttl_seconds;
+    $("cfgMax").value = cfg.max_concurrent_assignments_per_user;
+    $("cfgStrategy").value = cfg.assignment_strategy;
+    $("cfgNoSeg").checked = !!cfg.include_subjects_without_segmentation;
+    $("cfgRequeue").checked = !!cfg.requeue_rejected;
+    $("cfgGeometry").checked = !!cfg.require_geometry_match;
+    $("cfgBackups").checked = !!cfg.keep_segmentation_backups;
+  }
+
+  // --- data loading ---------------------------------------------------------
+  function refreshAll() {
+    var state = $("stateFilter").value;
+    return Promise.all([
+      api("GET", "/admin/api/stats").then(renderStats),
+      api("GET", "/admin/api/users").then(renderUsers),
+      api("GET", "/admin/api/assignments?limit=100" + (state ? "&state=" + state : "")).then(renderAssignments),
+      api("GET", "/admin/api/submissions?limit=50").then(renderLog)
+    ])["catch"](function (err) { showError(err.message); });
+  }
+
+  // --- actions --------------------------------------------------------------
+  $("refreshBtn").addEventListener("click", refreshAll);
+  $("stateFilter").addEventListener("change", refreshAll);
+
+  $("reindexBtn").addEventListener("click", function () {
+    api("POST", "/admin/api/refresh-index", {})
+      .then(renderStats)["catch"](function (err) { showError(err.message); });
+  });
+
+  $("createBtn").addEventListener("click", function () {
+    var name = $("newName").value.trim();
+    if (!name) { showError("A reviewer name is required."); return; }
+    api("POST", "/admin/api/users", {
+      name: name,
+      allowed_dataset_ids: $("newDatasets").value.trim(),
+      note: $("newNote").value.trim()
+    }).then(function (result) {
+      $("newKeyName").textContent = result.user.name;
+      $("newKeyValue").textContent = result.api_key;
+      $("newKeyBox").hidden = false;
+      $("newName").value = "";
+      $("newDatasets").value = "";
+      $("newNote").value = "";
+      return refreshAll();
+    })["catch"](function (err) { showError(err.message); });
+  });
+
+  $("usersBody").addEventListener("click", function (event) {
+    var button = event.target.closest("button");
+    if (!button) { return; }
+    var name = button.getAttribute("data-name");
+    var act = button.getAttribute("data-act");
+
+    if (act === "rotate") {
+      if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
+      api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
+        .then(function (result) {
+          $("newKeyName").textContent = result.name;
+          $("newKeyValue").textContent = result.api_key;
+          $("newKeyBox").hidden = false;
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+    } else if (act === "toggle") {
+      api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/active",
+          { active: button.getAttribute("data-active") === "true" })
+        .then(refreshAll)["catch"](function (err) { showError(err.message); });
+    } else if (act === "delete") {
+      if (!window.confirm("Delete reviewer '" + name + "'? Their open subjects return to the queue.")) { return; }
+      api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
+        .then(refreshAll)["catch"](function (err) { showError(err.message); });
+    }
+  });
+
+  $("assignBody").addEventListener("click", function (event) {
+    var button = event.target.closest('button[data-act="release"]');
+    if (!button) { return; }
+    api("POST", "/admin/api/assignments/" + encodeURIComponent(button.getAttribute("data-id")) + "/release", {})
+      .then(refreshAll)["catch"](function (err) { showError(err.message); });
+  });
+
+  $("saveCfgBtn").addEventListener("click", function () {
+    var eligible = $("cfgEligible").value.split(",")
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean)
+      .map(Number);
+    api("PUT", "/admin/api/config", {
+      eligible_label_values: eligible,
+      lease_ttl_seconds: Number($("cfgLease").value),
+      max_concurrent_assignments_per_user: Number($("cfgMax").value),
+      assignment_strategy: $("cfgStrategy").value,
+      include_subjects_without_segmentation: $("cfgNoSeg").checked,
+      requeue_rejected: $("cfgRequeue").checked,
+      require_geometry_match: $("cfgGeometry").checked,
+      keep_segmentation_backups: $("cfgBackups").checked
+    }).then(function (cfg) {
+      fillConfig(cfg);
+      var msg = $("cfgMsg");
+      msg.textContent = "Policy saved and the dataset re-scanned.";
+      msg.hidden = false;
+      window.setTimeout(function () { msg.hidden = true; }, 4000);
+      return refreshAll();
+    })["catch"](function (err) { showError(err.message); });
+  });
+
+  // --- boot -----------------------------------------------------------------
+  var stored = null;
+  try { stored = window.sessionStorage.getItem(KEY_STORAGE); } catch (e) { stored = null; }
+  if (stored) {
+    signIn(stored)["catch"](function () {
+      adminKey = null;
+      try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
+    });
+  }
+}());
+</script>
+</body>
+</html>

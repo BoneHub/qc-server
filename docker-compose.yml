@@ -1,0 +1,61 @@
+# Run the quality-check server against a BoneHub dataset folder on an SMB share.
+#
+#   1. copy .env.example to .env and fill in the share and your credentials
+#   2. docker compose up -d
+#   3. docker compose logs | grep -A2 "admin key"   # first start prints the admin key
+#   4. open http://localhost:8000/admin
+#
+# The dataset is mounted through a CIFS volume rather than a bind mount because Docker
+# Desktop cannot bind-mount a Windows mapped network drive: given "Z:/..." it silently
+# creates an empty folder instead, and the server then starts against an empty dataset.
+# Mounting the UNC path here keeps Docker out of the drive-letter business entirely.
+# For a dataset on a local disk, see the bind-mount block at the bottom of this file.
+
+services:
+  bonehub-qc-server:
+    build: .
+    image: bonehub-qc-server:latest
+    container_name: bonehub-qc-server
+    ports:
+      - "${BONEHUB_QC_PORT:-8000}:8000"
+    volumes:
+      # Mounted read-write: confirmed segmentations, the updated Subject_info files,
+      # the logs and all server state are written back into the dataset.
+      - "bonehub-dataset:/data"
+    environment:
+      BONEHUB_QC_DATASET_ROOT: /data
+      # Leave these blank to have the server generate and store them on first start.
+      BONEHUB_QC_ADMIN_KEY: "${BONEHUB_QC_ADMIN_KEY:-}"
+      BONEHUB_QC_PRIVATE_KEY: "${BONEHUB_QC_PRIVATE_KEY:-}"
+      # Queue policy. Anything in QCServerConfig can be set as BONEHUB_QC_<FIELD>.
+      # Blank means every dataset under the root; "none" resets a previously saved value.
+      BONEHUB_QC_ALLOWED_DATASET_IDS: "${BONEHUB_QC_ALLOWED_DATASET_IDS:-}"
+      BONEHUB_QC_ELIGIBLE_LABEL_VALUES: "${BONEHUB_QC_ELIGIBLE_LABEL_VALUES:-2}"
+      BONEHUB_QC_LEASE_TTL_SECONDS: "${BONEHUB_QC_LEASE_TTL_SECONDS:-86400}"
+      BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER: "${BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER:-1}"
+    restart: unless-stopped
+
+volumes:
+  # A named volume, so the CIFS options below are applied by Docker's own mount rather
+  # than by Windows. uid/gid 0 match the container, which runs as root.
+  #
+  # IMPORTANT: the options are baked in when the volume is first created. After changing
+  # anything here or in the SMB variables in .env, recreate it:
+  #     docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
+  # Nothing is lost -- the volume holds no data of its own, only the mount to the share.
+  bonehub-dataset:
+    name: bonehub_dataset_qc_data
+    driver: local
+    driver_opts:
+      type: cifs
+      device: "${BONEHUB_DATASET_SHARE:?set BONEHUB_DATASET_SHARE in .env, e.g. //server/share/BoneHub_Dataset}"
+      o: "username=${BONEHUB_SMB_USERNAME:?set BONEHUB_SMB_USERNAME in .env},password=${BONEHUB_SMB_PASSWORD:?set BONEHUB_SMB_PASSWORD in .env},uid=0,gid=0,file_mode=0664,dir_mode=0775,${BONEHUB_SMB_OPTIONS:-vers=3.0}"
+
+# Dataset on a local disk instead of a share? Replace the volumes: block above with
+# nothing and give the service a plain bind mount:
+#
+#   volumes:
+#     - "${BONEHUB_DATASET_ROOT:?set BONEHUB_DATASET_ROOT in .env}:/data"
+#
+# This works only for a real local path (C:/data/BoneHub_Dataset), never for a mapped
+# network drive letter.
