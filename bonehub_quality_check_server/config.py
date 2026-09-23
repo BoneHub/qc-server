@@ -1,12 +1,17 @@
-"""Server configuration.
+"""Server configuration, and where the server keeps things.
 
-The configuration lives in ``<dataset_root>/<state_dir_name>/config.json`` so that a
-dataset folder carries its own quality-check policy around with it. Any field can be
-overridden at startup through an environment variable named ``BONEHUB_QC_<FIELD>``,
-which is how the Docker image is configured.
+Two places, on purpose:
 
-The file records the ``bonehub_data_schema`` version it was written under, because label
-statuses are part of the policy and their meaning changes between schema versions.
+* the credentials folder, inside the container (``BONEHUB_QC_CREDENTIALS_DIR``): the
+  server's id, private key, admin key and reviewer accounts. Never on the dataset share.
+* ``<dataset_root>/<state_dir_name>/<server_id>/`` on the share: this server's policy
+  (``config.json``), assignments, logs and backups. One folder per server, so servers with
+  different admins working on one dataset do not overwrite each other.
+
+Any config field can be overridden at startup through an environment variable named
+``BONEHUB_QC_<FIELD>``, which is how the Docker image is configured. ``config.json``
+records the ``bonehub_data_schema`` version it was written under, because label statuses
+are part of the policy and their meaning can change between schema versions.
 """
 
 from __future__ import annotations
@@ -22,6 +27,8 @@ from bonehub_data_schema import VALID_LABEL_VALUES, __version__ as SCHEMA_VERSIO
 
 ENV_PREFIX = "BONEHUB_QC_"
 DEFAULT_STATE_DIR_NAME = ".bonehub_qc"
+#: Inside the container; the Docker image and docker-compose.yml mount a volume here.
+DEFAULT_CREDENTIALS_DIR = "/var/lib/bonehub-qc"
 CONFIG_FILE_NAME = "config.json"
 SCHEMA_VERSION_KEY = "schema_version"
 
@@ -43,17 +50,6 @@ STATUS_REVIEWED = 2
 
 #: Statuses a label can have while it has a segmentation to look at.
 REVIEWABLE_STATUSES = {STATUS_NOT_REVIEWED, STATUS_REVIEWED}
-
-#: Label statuses before schema 0.3, mapped to their meaning since: -1/0 not available,
-#: 1 from the original source and 2 generated but unchecked are both "not reviewed", and
-#: 3 "passed quality check" is "reviewed".
-_PRE_0_3_STATUSES = {
-    -1: STATUS_NOT_AVAILABLE,
-    0: STATUS_NOT_AVAILABLE,
-    1: STATUS_NOT_REVIEWED,
-    2: STATUS_NOT_REVIEWED,
-    3: STATUS_REVIEWED,
-}
 
 
 class QCServerConfig(BaseModel):
@@ -116,7 +112,7 @@ class QCServerConfig(BaseModel):
     )
     keep_segmentation_backups: bool = Field(
         True,
-        description="Copy the previous segmentation into the state folder before overwriting it.",
+        description="Copy the previous segmentation into this server's folder before overwriting it.",
     )
     max_upload_bytes: int = Field(
         512 * 1024 * 1024,
@@ -145,8 +141,8 @@ class QCServerConfig(BaseModel):
     def load(cls, config_path: Path, notify: Callable[[str], None] | None = None) -> "QCServerConfig":
         """Read the config file if it exists, then apply ``BONEHUB_QC_*`` overrides.
 
-        A file written under another schema version has its label statuses translated or
-        reset, see :func:`_upgrade`; ``notify`` receives a line for each change.
+        A file written under another schema version has its label statuses reset, see
+        :func:`_upgrade`; ``notify`` receives a line for each change.
         """
         data: dict = {}
         if config_path.exists():
@@ -178,31 +174,19 @@ class QCServerConfig(BaseModel):
 def _upgrade(data: dict, notify: Callable[[str], None]) -> dict:
     """Bring a stored config written under another schema version up to this one.
 
-    A file without a version was written before schema 0.3, whose label statuses are
-    translated. A file from any other version has its label statuses reset to the default,
-    since there is no telling what they meant.
+    Label statuses can mean something else in another schema version, so a file from one
+    -- or a file that records none -- has them reset to the default.
     """
     data = dict(data)
     version = data.pop(SCHEMA_VERSION_KEY, None)
     if is_compatible_schema_version(version):
         return data
 
-    if "confirmed_label_value" in data:
-        dropped = data.pop("confirmed_label_value")
-        notify(
-            f"config.json: dropped confirmed_label_value={dropped}; confirmed labels are always set to "
-            f"{STATUS_REVIEWED} ('{VALID_LABEL_VALUES[STATUS_REVIEWED]}')."
-        )
     if "eligible_label_values" in data:
-        old = data["eligible_label_values"]
-        if version is None:
-            new = sorted({_PRE_0_3_STATUSES.get(value, STATUS_NOT_AVAILABLE) for value in old} & REVIEWABLE_STATUSES)
-        else:
-            new = []
-        data["eligible_label_values"] = new or [STATUS_NOT_REVIEWED]
+        old = data.pop("eligible_label_values")
         notify(
-            f"config.json was written under schema {version or 'older than 0.3'}: eligible_label_values "
-            f"{old} is now {data['eligible_label_values']} in the label statuses of schema {SCHEMA_VERSION}."
+            f"config.json was written under schema {version or '(not recorded)'}: eligible_label_values "
+            f"{old} reset to the default, {[STATUS_NOT_REVIEWED]}, of schema {SCHEMA_VERSION}."
         )
     return data
 
@@ -233,7 +217,12 @@ def resolve_dataset_root() -> Path:
     return Path(raw)
 
 
-def resolve_state_dir(dataset_root: Path) -> Path:
-    """Folder inside the dataset root where users, assignments, logs and backups live."""
+def resolve_state_root(dataset_root: Path) -> Path:
+    """Folder inside the dataset root that holds one sub-folder per server."""
     name = os.environ.get(f"{ENV_PREFIX}STATE_DIR_NAME", DEFAULT_STATE_DIR_NAME)
     return dataset_root / name
+
+
+def resolve_credentials_dir() -> Path:
+    """Folder inside the container for the server's credentials, from ``BONEHUB_QC_CREDENTIALS_DIR``."""
+    return Path(os.environ.get(f"{ENV_PREFIX}CREDENTIALS_DIR") or DEFAULT_CREDENTIALS_DIR)

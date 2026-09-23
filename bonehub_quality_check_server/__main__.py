@@ -1,10 +1,11 @@
-"""Command line entry point.
+"""Command line entry point: the container's own command, and how it is administered.
 
-    bonehub-qc-server serve          --dataset-root Z:/BoneHub/BoneHub_Dataset
-    bonehub-qc-server add-user       --dataset-root Z:/... --name alice
-    bonehub-qc-server show-admin-key --dataset-root Z:/...
+The container runs ``bonehub-qc-server serve``. Everything else is run inside it, where the
+dataset root and the credentials folder come from the environment:
 
-The same commands are available as ``python -m bonehub_quality_check_server <command>``.
+    docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
+    docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
+    docker compose exec bonehub-qc-server bonehub-qc-server sessions
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import argparse
 import os
 from pathlib import Path
 
-from .config import ENV_PREFIX, QCServerConfig, resolve_state_dir
+from .config import ENV_PREFIX, QCServerConfig, resolve_credentials_dir, resolve_state_root
 from .store import QCStore
 
 
@@ -25,26 +26,35 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         help="Folder in BoneHub data structure format. Defaults to $BONEHUB_QC_DATASET_ROOT.",
     )
     parser.add_argument(
-        "--state-dir",
+        "--credentials-dir",
         type=Path,
         default=None,
-        help="Where server state is kept. Defaults to '<dataset-root>/.bonehub_qc'.",
+        help="Where the server keeps its credentials, inside the container. Defaults to $BONEHUB_QC_CREDENTIALS_DIR.",
     )
 
 
-def _open_store(args: argparse.Namespace) -> QCStore:
+def _dataset_root(args: argparse.Namespace) -> Path:
     if not args.dataset_root:
         raise SystemExit("A dataset root is required: pass --dataset-root or set BONEHUB_QC_DATASET_ROOT.")
-    dataset_root = Path(args.dataset_root)
-    state_dir = Path(args.state_dir) if args.state_dir else resolve_state_dir(dataset_root)
-    return QCStore(dataset_root=dataset_root, state_dir=state_dir)
+    return Path(args.dataset_root)
+
+
+def _open_store(args: argparse.Namespace) -> QCStore:
+    dataset_root = _dataset_root(args)
+    return QCStore(
+        dataset_root=dataset_root,
+        credentials_dir=args.credentials_dir or resolve_credentials_dir(),
+        state_root=resolve_state_root(dataset_root),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="bonehub-qc-server", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="bonehub-qc-server", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    serve = subparsers.add_parser("serve", help="Run the quality-check server.")
+    serve = subparsers.add_parser("serve", help="Run the quality-check server (the container's command).")
     _add_common(serve)
     serve.add_argument("--host", default=os.environ.get(f"{ENV_PREFIX}HOST", "0.0.0.0"))
     serve.add_argument("--port", type=int, default=int(os.environ.get(f"{ENV_PREFIX}PORT", "8000")))
@@ -63,8 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(rotate)
     rotate.add_argument("--name", required=True)
 
-    show_key = subparsers.add_parser("show-admin-key", help="Print the admin key for this dataset folder.")
+    show_key = subparsers.add_parser("show-admin-key", help="Print this server's admin key.")
     _add_common(show_key)
+
+    sessions = subparsers.add_parser("sessions", help="List the servers that have kept state in this dataset.")
+    _add_common(sessions)
 
     stats = subparsers.add_parser("stats", help="Print queue statistics.")
     _add_common(stats)
@@ -83,15 +96,15 @@ def main(argv: list[str] | None = None) -> int:
 
         from .app import create_app
 
-        if not args.dataset_root:
-            raise SystemExit("A dataset root is required: pass --dataset-root or set BONEHUB_QC_DATASET_ROOT.")
-        dataset_root = Path(args.dataset_root)
+        dataset_root = _dataset_root(args)
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(dataset_root)
+        if args.credentials_dir:
+            os.environ[f"{ENV_PREFIX}CREDENTIALS_DIR"] = str(args.credentials_dir)
         if args.reload:
             # The reloader needs an import string rather than a live application object.
             uvicorn.run("bonehub_quality_check_server.app:app", host=args.host, port=args.port, reload=True)
         else:
-            app = create_app(dataset_root=dataset_root, state_dir=args.state_dir)
+            app = create_app(dataset_root=dataset_root, credentials_dir=args.credentials_dir)
             uvicorn.run(app, host=args.host, port=args.port)
         return 0
 
@@ -124,6 +137,16 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "show-admin-key":
         print(store.admin_key)
+        return 0
+
+    if args.command == "sessions":
+        print(f"{'server id':<24}{'created':<23}{'last started':<23}{'host':<16}")
+        for session in store.sessions():
+            marker = "  <- this server" if session["this_server"] else ""
+            print(
+                f"{session.get('server_id') or '?':<24}{session.get('created_at') or '?':<23}"
+                f"{session.get('last_started_at') or 'never':<23}{session.get('host') or '?':<16}{marker}"
+            )
         return 0
 
     if args.command == "stats":

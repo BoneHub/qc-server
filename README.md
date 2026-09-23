@@ -11,6 +11,8 @@ the one in the dataset and the labels the reviewer vouches for are set to status
 had before. Rejected subjects leave the dataset untouched and are only recorded in the
 audit trail.
 
+The server runs in Docker; there is no other supported way to run it.
+
 ## Features
 
 - Leased assignments: a reviewer holds a subject for a limited time, after which it returns
@@ -22,15 +24,143 @@ audit trail.
   rewritten in canonical form, and the previous segmentation is backed up first.
 - Audit trail: `submissions.jsonl`, `server.log`, and a human-readable
   `Dataset_XXX_qualitycheck.log` next to each dataset.
-- All server state lives inside the dataset folder (`.bonehub_qc/`), so a dataset carries
-  its own quality-check policy and history with it.
+- Credentials stay inside the container, never on the dataset share.
+- Several servers, each with its own admin, can work on one dataset: each keeps its state
+  in a folder of its own, and none hands out a subject another one has leased.
 
 ## Requirements
 
-- Python 3.10+ (or Docker)
+- Docker with Compose v2 (Docker Desktop, or Docker Engine on Linux)
 - Read-write access to a folder in BoneHub data structure format (`Dataset_001`,
   `Dataset_002`, ...), written with BoneHub data schema 0.3 — see
   [Dataset format](#dataset-format)
+
+## Installation
+
+```bash
+git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
+cd bonehub_dataset_quality_check_server
+cp .env.example .env                          # then set the share and its credentials
+docker compose up -d --build
+docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
+```
+
+Open `http://<host>:8000/admin` and log in with that key.
+
+The dataset is mounted over SMB, configured by four values in `.env`:
+
+| Variable | Example |
+| --- | --- |
+| `BONEHUB_DATASET_SHARE` | `//192.168.0.10/Data/BoneHub/BoneHub_Dataset` |
+| `BONEHUB_SMB_USERNAME` | `alice` |
+| `BONEHUB_SMB_PASSWORD` | the share password |
+| `BONEHUB_SMB_OPTIONS` | `domain=AD,vers=3.0` |
+
+Give `BONEHUB_DATASET_SHARE` as a UNC path, **not** as a Windows drive letter. Docker
+Desktop cannot bind-mount a mapped network drive: handed `Z:/BoneHub/BoneHub_Dataset` it
+creates an empty folder and mounts that instead, so the server starts normally against an
+empty dataset and reports `0 of 0 subjects`. `net use` prints the UNC path behind each
+mapped drive. A password containing a comma cannot be used (the comma ends the mount
+option), and a literal `$` must be written `$$`.
+
+The share is mounted through a named volume whose options are fixed when it is first
+created, so after changing any of the four values recreate it:
+
+```bash
+docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
+```
+
+That volume holds no data of its own — only the mount to the share — so nothing is lost.
+For a dataset on a local disk, [`docker-compose.yml`](docker-compose.yml) ends with the
+bind-mount alternative.
+
+To update the server, pull and rebuild; the server keeps its admin key and reviewers:
+
+```bash
+git pull && docker compose up -d --build
+```
+
+## Administration
+
+### The admin key
+
+A new server generates an admin key and prints it once, in the startup banner, unless
+`BONEHUB_QC_ADMIN_KEY` in `.env` chooses one. The key is kept inside the container, never
+on the share. If it is lost, print it again from the running container:
+
+```bash
+docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
+```
+
+or start a new server, which issues a new admin key (see
+[Where the server keeps things](#where-the-server-keeps-things)).
+
+### Reviewers
+
+From the admin panel, or with the server's command line inside the running container:
+
+```bash
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --datasets 1,2
+docker compose exec bonehub-qc-server bonehub-qc-server list-users
+docker compose exec bonehub-qc-server bonehub-qc-server rotate-key --name alice
+```
+
+The reviewer API key is shown once, at creation. Hand it to the reviewer together with the
+server URL; they enter both in the 3D Slicer extension. The running server sees a reviewer
+added this way at once.
+
+### Other commands
+
+```bash
+docker compose exec bonehub-qc-server bonehub-qc-server stats         # the queue
+docker compose exec bonehub-qc-server bonehub-qc-server show-config   # the effective policy
+docker compose exec bonehub-qc-server bonehub-qc-server sessions      # every server of this dataset
+docker compose logs -f                                                 # the server's output
+```
+
+Endpoints:
+
+| URL | What it is |
+| --- | --- |
+| `/admin` | Admin panel (asks for the admin key) |
+| `/docs` | Interactive OpenAPI documentation |
+| `/health` | Unauthenticated liveness probe |
+| `/api/v1/...` | Client API, authenticated with `X-API-Key` |
+
+## Where the server keeps things
+
+**Credentials** — the server's id, its private key, the admin key, and the reviewer
+accounts with their key digests — are kept inside the container, in `/var/lib/bonehub-qc`,
+which docker-compose mounts from the `bonehub_qc_credentials` volume on the Docker host.
+They are never written to the dataset share, and the server refuses to start if its
+credentials folder is inside the dataset.
+
+**Everything else** is on the share, in a folder of the server's own, named after its id:
+
+```
+<dataset-root>/.bonehub_qc/<server id>/
+├── session.json          which server this is, when it was created and last started
+├── config.json           quality-check policy, with the schema version its statuses belong to
+├── assignments.json      open and finished assignments
+├── submissions.jsonl     append-only audit trail
+├── server.log            server lifecycle and administrative events
+├── backups/              previous segmentations (.seg.nrrd), kept before overwriting
+└── tmp/                  uploads being validated
+```
+
+The credentials volume *is* the server:
+
+| You run | What happens |
+| --- | --- |
+| `docker compose up -d`, `restart`, `up -d --build` | Same server: same admin key, reviewers and state folder |
+| `docker compose down -v`, then `up -d` | A **new** server: a new id and state folder, a new admin key (printed once), no reviewers. The old server's folder stays on the share as history |
+
+Several servers, each with its own admin, can therefore work on one dataset — from
+different machines, or one after the other — without overwriting each other: each has its
+own state folder, and a server does not hand out a subject that another one has out for
+review. `bonehub-qc-server sessions` lists them. Changing `BONEHUB_QC_PRIVATE_KEY`
+invalidates every reviewer API key already issued.
 
 ## Dataset format
 
@@ -63,104 +193,22 @@ What a confirmed submission does to each label:
 
 ### Upgrading from server 0.1
 
-Server 0.1 used the pre-0.3 label values (`-1`…`3`) and NIfTI segmentations. The
-`config.json` it left in `.bonehub_qc/` is upgraded on the first start and the change is
-logged: `confirmed_label_value` is dropped (confirmed labels are always `2`), and
-`eligible_label_values` is translated (old `2`, "generated, without quality check", becomes
-`1`). `BONEHUB_QC_ELIGIBLE_LABEL_VALUES` in `.env` is **not** translated — it is read in the
-new statuses, so `1` is the value that queues unreviewed subjects.
+Server 0.1 used the pre-0.3 label statuses (`-1`…`3`) and NIfTI segmentations, and kept
+everything — its keys and reviewers included — directly in `<dataset-root>/.bonehub_qc/`.
+The new server reads none of those files:
 
-## Installation
+- Regenerate the datasets with the schema 0.3 converters; the server skips the others.
+- Delete `server_private_key`, `admin_key` and `users.json` from
+  `<dataset-root>/.bonehub_qc/`. The server warns at every start while they are there, but
+  deletes nothing on the share itself. The old `assignments.json`, `submissions.jsonl`,
+  `server.log` and `backups/` can stay as history.
+- Reviewers need new keys from the new server.
+- `BONEHUB_QC_ELIGIBLE_LABEL_VALUES` in `.env` is read in the new statuses: `1` queues the
+  subjects nobody has reviewed yet.
 
-### Docker (recommended)
+## Client flow
 
-```bash
-git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
-cd bonehub_dataset_quality_check_server
-cp .env.example .env          # then set the share and your credentials
-docker compose up -d
-docker compose logs | grep -A2 "admin key"   # the first start prints the admin key
-```
-
-The dataset is mounted over SMB, configured by four values in `.env`:
-
-| Variable | Example |
-| --- | --- |
-| `BONEHUB_DATASET_SHARE` | `//192.168.0.10/Data/BoneHub/BoneHub_Dataset` |
-| `BONEHUB_SMB_USERNAME` | `alice` |
-| `BONEHUB_SMB_PASSWORD` | the share password |
-| `BONEHUB_SMB_OPTIONS` | `domain=AD,vers=3.0` |
-
-Give `BONEHUB_DATASET_SHARE` as a UNC path, **not** as a Windows drive letter. Docker
-Desktop cannot bind-mount a mapped network drive: handed `Z:/BoneHub/BoneHub_Dataset` it
-creates an empty folder and mounts that instead, so the server starts normally against an
-empty dataset and reports `0 of 0 subjects`. `net use` prints the UNC path behind each
-mapped drive. A password containing a comma cannot be used (the comma ends the mount
-option), and a literal `$` must be written `$$`.
-
-The share is mounted through a named volume whose options are fixed when it is first
-created, so after changing any of the four values recreate it:
-
-```bash
-docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
-```
-
-The volume holds no data of its own — only the mount to the share — so nothing is lost.
-For a dataset on a local disk, [`docker-compose.yml`](docker-compose.yml) ends with the
-bind-mount alternative.
-
-### From source
-
-```bash
-git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
-cd bonehub_dataset_quality_check_server
-pip install .            # pip install -e ".[dev]" for development
-```
-
-## Usage
-
-### Run the server
-
-```bash
-bonehub-qc-server serve --dataset-root Z:/BoneHub/BoneHub_Dataset --port 8000
-```
-
-`--dataset-root` may also be given as `BONEHUB_QC_DATASET_ROOT`. The same commands are
-available as `python -m bonehub_quality_check_server <command>`.
-
-On the first start against a dataset folder, an admin key is generated and printed in the
-startup banner; it is stored in `<dataset-root>/.bonehub_qc/admin_key`. Set
-`BONEHUB_QC_ADMIN_KEY` to choose your own instead.
-
-Endpoints once it is up:
-
-| URL | What it is |
-| --- | --- |
-| `/admin` | Admin panel (asks for the admin key) |
-| `/docs` | Interactive OpenAPI documentation |
-| `/health` | Unauthenticated liveness probe |
-| `/api/v1/...` | Client API, authenticated with `X-API-Key` |
-
-### Add reviewers
-
-From the admin panel, or from the command line:
-
-```bash
-bonehub-qc-server add-user       --dataset-root Z:/... --name alice
-bonehub-qc-server add-user       --dataset-root Z:/... --name bob --datasets 1,2
-bonehub-qc-server list-users     --dataset-root Z:/...
-bonehub-qc-server rotate-key     --dataset-root Z:/... --name alice
-bonehub-qc-server show-admin-key --dataset-root Z:/...
-bonehub-qc-server stats          --dataset-root Z:/...
-bonehub-qc-server show-config    --dataset-root Z:/...
-```
-
-The reviewer API key is shown once, at creation. Hand it to the reviewer together with the
-server URL; they enter both in the 3D Slicer extension.
-
-### Client flow
-
-Reviewers normally use the 3D Slicer extension, which follows this sequence:
+Reviewers use the 3D Slicer extension, which follows this sequence:
 
 1. `GET /api/v1/ping` — check the key; reports the server's `schema_version`
 2. `GET /api/v1/labels` — the label map and label statuses
@@ -170,7 +218,7 @@ Reviewers normally use the 3D Slicer extension, which follows this sequence:
 6. `POST /api/v1/assignments/{id}/submit` — send the verdict back, with the reviewed `.seg.nrrd`
 
 [`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client
-for the same API (it is the file shipped inside the Slicer extension):
+for the same API; it is the file shipped inside the Slicer extension:
 
 ```python
 from pathlib import Path
@@ -192,9 +240,9 @@ naming the problem.
 
 ## Configuration
 
-Settings are read from `<dataset-root>/.bonehub_qc/config.json` and can be overridden at
-startup by an environment variable per field, named `BONEHUB_QC_<FIELD>`. They are also
-editable from the admin panel. The most used ones:
+The policy is set in `.env`, as one `BONEHUB_QC_<FIELD>` variable per setting, and can be
+changed at runtime from the admin panel. The server stores it in its `config.json`; a
+variable set in `.env` wins over the stored value at every start. The most used settings:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -210,53 +258,31 @@ editable from the admin panel. The most used ones:
 | `keep_segmentation_backups` | `true` | Back up a segmentation before overwriting it |
 | `max_upload_bytes` | `536870912` | Largest accepted segmentation upload |
 
-See [`.env.example`](.env.example) for the Docker-facing subset and
-[`config.py`](bonehub_quality_check_server/config.py) for the full list.
-
-## Server state
-
-Everything the server owns lives in one folder inside the dataset, so nothing is lost when
-the container is recreated:
-
-```
-<dataset-root>/.bonehub_qc/
-├── config.json           quality-check policy, with the schema version its statuses belong to
-├── server_private_key    generated on first start
-├── admin_key             generated on first start
-├── users.json            reviewers and hashed API keys
-├── assignments.json      open and finished assignments
-├── submissions.jsonl     append-only audit trail
-├── server.log            server lifecycle and administrative events
-├── backups/              previous segmentations (.seg.nrrd), kept before overwriting
-└── tmp/                  uploads being validated
-```
-
-Changing `BONEHUB_QC_PRIVATE_KEY` invalidates every reviewer API key already issued.
-
-## License
-
-See [LICENSE](LICENSE).
+See [`.env.example`](.env.example) for the variables and
+[`config.py`](bonehub_quality_check_server/config.py) for the full list. A setting that
+`.env` does not name is added to the `environment:` block of `docker-compose.yml` the same
+way as the others.
 
 ## Tests
 
-The suite is plain `unittest` — no pytest, no plugins. It builds a throw-away dataset in
-BoneHub data structure format under a temporary folder for every test, so it never touches
-a real dataset.
+The suite is plain `unittest` and runs in the server's own image, so it needs nothing but
+Docker. It builds a throw-away dataset in BoneHub data structure format under a temporary
+folder for every test, so it never touches a real dataset.
 
 ```bash
-conda activate bonehub-qc
-python -m unittest discover -s tests            # everything
-python -m unittest tests.test_submission -v     # one module
-python -m unittest tests.test_submission.ConfirmedSubmissionTests.test_confirmed_labels_become_reviewed_in_subject_info
+docker build -t bonehub-qc-server .
+docker run --rm -v "${PWD}:/src" -w /src bonehub-qc-server \
+    sh -c "pip install -q httpx && python -m unittest discover -s tests -t ."
 ```
 
-The suite needs `bonehub_data_schema` 0.3 with its `[io]` extra (`pip install -e .` pulls
-it in); the fixtures write their masks with the schema's own functions.
+To run one module or one test, replace the last command, for example with
+`python -m unittest tests.test_submission -v`.
 
 | Module | What it covers |
 | --- | --- |
-| `test_config.py` | The policy file, its `BONEHUB_QC_*` overrides, and upgrading a file from an older schema |
-| `test_auth.py` | Server private key, per-reviewer API keys, disabling and rotation |
+| `test_config.py` | The policy file, its `BONEHUB_QC_*` overrides, and a policy stored under another schema |
+| `test_auth.py` | Server id, private key, per-reviewer API keys, disabling and rotation, accounts changed from the CLI |
+| `test_sessions.py` | Credentials kept off the share, the admin key printed once, several servers on one dataset |
 | `test_queue.py` | Which subjects are queued, schema versions, restricting the server to specific datasets, broken dataset folders |
 | `test_assignment.py` | Who gets which subject, leases, expiry, release, requeue policy |
 | `test_submission.py` | Confirmed submissions marking labels reviewed (2), the `.seg.nrrd` format and its validation, rejections changing nothing, partial uploads, audit trail |
@@ -265,6 +291,10 @@ it in); the fixtures write their masks with the schema's own functions.
 | `test_client.py` | `client.py` against a real uvicorn server on a real socket |
 | `test_cli.py` | `bonehub-qc-server` commands |
 | `test_concurrency.py` | Several reviewers hitting the server at once |
-| `test_deployment.py` | Start-up from environment variables only, and the shipped docker files |
+| `test_deployment.py` | Start-up from environment variables only, the credentials volume, and the shipped docker files |
 
 `tests/support.py` holds the dataset builder and the base test case.
+
+## License
+
+See [LICENSE](LICENSE).

@@ -113,6 +113,7 @@ class QueueStats(BaseModel):
     eligible_subjects: int
     available: int
     assigned: int
+    assigned_by_other_servers: int = Field(0, description="Eligible subjects out for review on another server")
     confirmed: int
     rejected: int
     datasets: dict[int, int] = Field(default_factory=dict, description="dataset id -> eligible subject count")

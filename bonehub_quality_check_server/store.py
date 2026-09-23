@@ -1,17 +1,29 @@
 """The quality-check store: subject index, reviewers, assignments and dataset writes.
 
-Everything the server owns lives in ``<dataset_root>/<state_dir>/``::
+The server keeps its credentials apart from everything else. The credentials folder is
+inside the container, never on the dataset share::
 
-    .bonehub_qc/
+    /var/lib/bonehub-qc/      (BONEHUB_QC_CREDENTIALS_DIR, a Docker volume)
+    |-- server_id             this server's name; a new credentials folder is a new server
+    |-- server_private_key    generated on first start, unless BONEHUB_QC_PRIVATE_KEY is set
+    |-- admin_key             generated on first start, unless BONEHUB_QC_ADMIN_KEY is set
+    `-- users.json            reviewers and their API key digests
+
+Everything else is on the share, in a folder of this server's own, so that several
+servers -- each with its own admin -- can work on one dataset without overwriting each
+other's state::
+
+    <dataset_root>/.bonehub_qc/<server_id>/
+    |-- session.json          which server this is, when it was created and last started
     |-- config.json           policy, see config.QCServerConfig
-    |-- server_private_key    generated on first start
-    |-- admin_key             generated on first start
-    |-- users.json            reviewers and their API key digests
     |-- assignments.json      which subject is with whom, and how it ended
     |-- submissions.jsonl     append-only audit trail
     |-- server.log
     |-- backups/              previous segmentations, kept before overwriting
     `-- tmp/                  uploads being validated
+
+A subject that another server has leased is not handed out here, so two servers never
+review the same subject at the same time.
 
 Only datasets written under this server's ``bonehub_data_schema`` version are served: in
 another version the label values, label statuses and segmentation format may differ.
@@ -23,9 +35,11 @@ so the simplicity is worth more than the concurrency; run the server with one wo
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import shutil
+import socket
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -43,14 +57,23 @@ from bonehub_data_schema import (
 )
 from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
+from . import __version__ as SERVER_VERSION
 from . import auth
 from .audit import AuditLog, utc_now_iso
-from .config import CONFIG_FILE_NAME, STATUS_NOT_AVAILABLE, STATUS_NOT_REVIEWED, STATUS_REVIEWED, QCServerConfig
+from .config import (
+    CONFIG_FILE_NAME,
+    DEFAULT_STATE_DIR_NAME,
+    STATUS_NOT_AVAILABLE,
+    STATUS_NOT_REVIEWED,
+    STATUS_REVIEWED,
+    QCServerConfig,
+)
 from .models import TERMINAL_STATES, Assignment, QueueStats, User
 from .segmentation import SegmentationError, UploadedSegmentation, read_segmentation_upload, write_segmentation
 
 USERS_FILE_NAME = "users.json"
 ASSIGNMENTS_FILE_NAME = "assignments.json"
+SESSION_FILE_NAME = "session.json"
 BACKUP_DIR_NAME = "backups"
 TMP_DIR_NAME = "tmp"
 
@@ -93,12 +116,30 @@ def subject_key_of(dataset_id: int, subject_id: int) -> str:
 class QCStore:
     """All server state and every write that touches the dataset folder."""
 
-    def __init__(self, dataset_root: Path, state_dir: Path, config: QCServerConfig | None = None):
+    def __init__(
+        self,
+        dataset_root: Path,
+        credentials_dir: Path,
+        config: QCServerConfig | None = None,
+        state_root: Path | None = None,
+    ):
+        """``credentials_dir`` is inside the container; ``state_root`` is the folder on the
+        share that holds one folder per server, ``<dataset_root>/.bonehub_qc`` by default."""
         if not dataset_root.is_dir():
             raise RuntimeError(f"Dataset root '{dataset_root}' does not exist or is not a directory.")
 
         self.dataset_root = dataset_root
-        self.state_dir = state_dir
+        self.credentials_dir = Path(credentials_dir)
+        self.state_root = Path(state_root) if state_root else dataset_root / DEFAULT_STATE_DIR_NAME
+        if _is_within(self.credentials_dir, self.dataset_root):
+            raise RuntimeError(
+                f"The credentials folder '{self.credentials_dir}' is inside the dataset folder. Credentials must "
+                "stay inside the container, off the shared dataset; set BONEHUB_QC_CREDENTIALS_DIR elsewhere."
+            )
+
+        auth.ensure_credentials_dir(self.credentials_dir)
+        self.server_id, self.server_created = auth.load_or_create_server_id(self.credentials_dir)
+        self.state_dir = self.state_root / self.server_id
         self.state_dir.mkdir(parents=True, exist_ok=True)
         (self.state_dir / BACKUP_DIR_NAME).mkdir(exist_ok=True)
         (self.state_dir / TMP_DIR_NAME).mkdir(exist_ok=True)
@@ -109,13 +150,24 @@ class QCStore:
         self.config = config or QCServerConfig.load(self.config_path, notify=self.audit.event)
         self.config.save(self.config_path)
 
-        self.private_key = auth.load_or_create_private_key(self.state_dir)
-        self.admin_key, self.admin_key_generated = auth.load_or_create_admin_key(self.state_dir)
+        self.private_key = auth.load_or_create_private_key(self.credentials_dir)
+        self.admin_key, self.admin_key_generated = auth.load_or_create_admin_key(self.credentials_dir)
 
         self._lock = threading.RLock()
 
         self._users: dict[str, User] = self._load_users()
+        self._users_stamp = self._users_file_stamp()
         self._assignments: dict[str, Assignment] = self._load_assignments()
+
+        self._record_session()
+        self.credentials_on_share = self._find_credentials_on_share()
+        if self.credentials_on_share:
+            self.audit.event(
+                "Credentials of an older server are on the dataset share: "
+                + ", ".join(str(path) for path in self.credentials_on_share)
+                + ". This server does not use them; delete them from the share.",
+                level=logging.WARNING,
+            )
 
         self._index: list[SubjectRef] = []
         self._index_by_key: dict[str, SubjectRef] = {}
@@ -143,6 +195,64 @@ class QCStore:
         """Where the segmentation belongs, whether or not it exists yet."""
         key = subject_key_of(dataset_id, subject_id)
         return self.dataset_path(dataset_id) / "Segmentation" / f"{key}{SEGMENTATION_SUFFIX}"
+
+    # --------------------------------------------------------------- sessions
+    def _record_session(self, started: bool = False) -> None:
+        """Write this server's ``session.json``, so the servers of a dataset can be told apart.
+
+        ``started`` marks a start of the server itself; the CLI, which opens the same state
+        next to it, leaves the start time alone.
+        """
+        path = self.state_dir / SESSION_FILE_NAME
+        previous = _read_json(path)
+        previous = previous if isinstance(previous, dict) else {}
+        now = utc_now_iso()
+        _atomic_write_json(
+            path,
+            {
+                "server_id": self.server_id,
+                "created_at": previous.get("created_at") or now,
+                "last_started_at": now if started else previous.get("last_started_at"),
+                "host": socket.gethostname() if started else previous.get("host", socket.gethostname()),
+                "server_version": SERVER_VERSION,
+                "schema_version": SCHEMA_VERSION,
+            },
+        )
+
+    def mark_started(self) -> None:
+        """Record that the server itself has started on this state."""
+        self._record_session(started=True)
+
+    def sessions(self) -> list[dict]:
+        """Every server that has kept state in this dataset, this one included, oldest first."""
+        found = []
+        for path in sorted(self.state_root.glob(f"*/{SESSION_FILE_NAME}")):
+            session = _read_json(path)
+            if isinstance(session, dict):
+                found.append({**session, "this_server": path.parent == self.state_dir})
+        return sorted(found, key=lambda session: str(session.get("created_at", "")))
+
+    def _find_credentials_on_share(self) -> list[Path]:
+        """Credential files an older server left in the shared state folder."""
+        return [self.state_root / name for name in auth.CREDENTIAL_FILE_NAMES if (self.state_root / name).exists()]
+
+    def _leased_by_other_sessions(self) -> set[str]:
+        """Subjects that another server on this dataset has out for review right now."""
+        now = datetime.now(timezone.utc)
+        leased: set[str] = set()
+        for path in self.state_root.glob(f"*/{ASSIGNMENTS_FILE_NAME}"):
+            if path.parent == self.state_dir:
+                continue
+            entries = _read_json(path)
+            for entry in entries if isinstance(entries, list) else []:
+                if not isinstance(entry, dict) or entry.get("state") != "assigned":
+                    continue
+                try:
+                    if _parse_iso(str(entry.get("expires_at"))) > now:
+                        leased.add(str(entry.get("subject_key")))
+                except ValueError:
+                    continue
+        return leased
 
     # ------------------------------------------------------------------ index
     def refresh_index(self) -> None:
@@ -234,7 +344,8 @@ class QCStore:
     # ------------------------------------------------------------------ users
     @property
     def users_path(self) -> Path:
-        return self.state_dir / USERS_FILE_NAME
+        """Reviewer accounts hold key digests, so they stay with the credentials, off the share."""
+        return self.credentials_dir / USERS_FILE_NAME
 
     def _load_users(self) -> dict[str, User]:
         if not self.users_path.exists():
@@ -243,11 +354,31 @@ class QCStore:
             raw = json.load(f)
         return {entry["name"]: User(**entry) for entry in raw}
 
+    def _users_file_stamp(self) -> tuple[int, int] | None:
+        try:
+            stat = self.users_path.stat()
+        except FileNotFoundError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _refresh_users(self) -> None:
+        """Pick up reviewer accounts another process changed. Caller holds the lock.
+
+        The CLI runs inside the container next to the live server (``docker compose exec``),
+        so an account it adds must reach the server, and must not be lost on its next save.
+        """
+        stamp = self._users_file_stamp()
+        if stamp != self._users_stamp:
+            self._users = self._load_users()
+            self._users_stamp = stamp
+
     def _save_users(self) -> None:
         _atomic_write_json(self.users_path, [user.model_dump() for user in self._users.values()])
+        self._users_stamp = self._users_file_stamp()
 
     def list_users(self) -> list[dict]:
         with self._lock:
+            self._refresh_users()
             users = [user.public_dict() for user in self._users.values()]
         counts = self._assignment_counts_per_user()
         for user in users:
@@ -263,6 +394,7 @@ class QCStore:
         if not name:
             raise QCError("A user name is required.")
         with self._lock:
+            self._refresh_users()
             if name in self._users:
                 raise QCError(f"User '{name}' already exists.", status_code=409)
             api_key = auth.generate_api_key()
@@ -339,6 +471,7 @@ class QCStore:
             raise QCError("Missing API key. Send it in the 'X-API-Key' header.", status_code=401)
         candidate = auth.hash_api_key(api_key, self.private_key)
         with self._lock:
+            self._refresh_users()
             for user in self._users.values():
                 if auth.keys_match(candidate, user.key_hash):
                     if not user.active:
@@ -357,6 +490,8 @@ class QCStore:
         )
 
     def _require_user(self, name: str) -> User:
+        """Caller holds the lock."""
+        self._refresh_users()
         user = self._users.get(name)
         if user is None:
             raise QCError(f"User '{name}' does not exist.", status_code=404)
@@ -443,9 +578,10 @@ class QCStore:
             candidates = [ref for ref in self._index if self._user_may_access(user, ref.dataset_id)]
             if self.config.assignment_strategy == "random":
                 random.shuffle(candidates)
+            leased_elsewhere = self._leased_by_other_sessions()
 
             for ref in candidates:
-                if not self._subject_is_available(ref.subject_key, user):
+                if ref.subject_key in leased_elsewhere or not self._subject_is_available(ref.subject_key, user):
                     continue
                 now = datetime.now(timezone.utc)
                 assignment = Assignment(
@@ -817,7 +953,9 @@ class QCStore:
             per_dataset: dict[int, int] = {}
             for ref in eligible:
                 per_dataset[ref.dataset_id] = per_dataset.get(ref.dataset_id, 0) + 1
-            available = sum(1 for ref in eligible if ref.subject_key not in assigned_keys)
+            eligible_keys = {ref.subject_key for ref in eligible}
+            elsewhere = (self._leased_by_other_sessions() & eligible_keys) - assigned_keys
+            available = len(eligible_keys - assigned_keys - elsewhere)
             built_at = self._index_built_at
             total = self._total_subjects
         return QueueStats(
@@ -825,6 +963,7 @@ class QCStore:
             eligible_subjects=len(eligible),
             available=available,
             assigned=len(assigned_keys),
+            assigned_by_other_servers=len(elsewhere),
             confirmed=confirmed,
             rejected=rejected,
             datasets=dict(sorted(per_dataset.items())),
@@ -861,6 +1000,24 @@ def _atomic_write_json(path: Path, payload) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=4)
     os.replace(tmp_path, path)
+
+
+def _read_json(path: Path):
+    """A JSON file's content, or None when it is missing or unreadable -- another server may be
+    halfway through replacing it."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _is_within(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def _to_iso(moment: datetime) -> str:

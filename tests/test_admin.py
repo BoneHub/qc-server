@@ -38,6 +38,8 @@ class AdminAuthTests(ApiTestCase):
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["dataset_root"], str(self.dataset_root))
         self.assertEqual(body["config"]["eligible_label_values"], [1])
+        self.assertEqual(body["server_id"], "qc_test_server")
+        self.assertEqual([session["server_id"] for session in body["sessions"]], ["qc_test_server"])
 
 
 class AdminUserManagementTests(ApiTestCase):

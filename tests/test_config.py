@@ -8,10 +8,12 @@ import unittest
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server.config import (
+    DEFAULT_CREDENTIALS_DIR,
     ENV_PREFIX,
     QCServerConfig,
+    resolve_credentials_dir,
     resolve_dataset_root,
-    resolve_state_dir,
+    resolve_state_root,
 )
 
 from tests.support import QCTestCase, clear_qc_env
@@ -95,44 +97,35 @@ class ConfigPersistenceTests(QCTestCase):
 
 
 class ConfigUpgradeTests(QCTestCase):
-    """A config.json left behind by a server of an older schema must not stop the new one."""
+    """A server kept across a schema upgrade must not read its statuses with the new meaning."""
 
-    def load_legacy(self, **fields) -> tuple:
+    def load_stored(self, **fields) -> tuple:
         path = self.tmp_path / "config.json"
         path.write_text(json.dumps({"lease_ttl_seconds": 7200, **fields}), encoding="utf-8")
         notes = []
         return QCServerConfig.load(path, notify=notes.append), notes
 
-    def test_a_pre_0_3_file_loads_with_its_statuses_translated(self):
-        """Old default: 2, 'generated, without quality check'. In schema 0.3 that is 1."""
-        config, notes = self.load_legacy(eligible_label_values=[2], confirmed_label_value=3)
+    def test_a_file_of_another_schema_has_its_statuses_reset(self):
+        config, notes = self.load_stored(schema_version="9.0.0", eligible_label_values=[2])
         self.assertEqual(config.eligible_label_values, [1])
         self.assertEqual(config.lease_ttl_seconds, 7200, "the rest of the policy is kept")
-        self.assertTrue(any("confirmed_label_value" in note for note in notes))
         self.assertTrue(any("eligible_label_values" in note for note in notes))
 
-    def test_every_old_status_maps_onto_the_new_ones(self):
-        self.assertEqual(self.load_legacy(eligible_label_values=[1, 2])[0].eligible_label_values, [1])
-        self.assertEqual(self.load_legacy(eligible_label_values=[3])[0].eligible_label_values, [2])
-        self.assertEqual(self.load_legacy(eligible_label_values=[2, 3])[0].eligible_label_values, [1, 2])
-        # Only 'not available' values: nothing to review, so back to the default.
-        self.assertEqual(self.load_legacy(eligible_label_values=[-1, 0])[0].eligible_label_values, [1])
-
-    def test_a_file_of_another_schema_has_its_statuses_reset(self):
-        config, notes = self.load_legacy(schema_version="9.0.0", eligible_label_values=[2])
+    def test_a_file_that_records_no_schema_has_its_statuses_reset(self):
+        config, notes = self.load_stored(eligible_label_values=[2])
         self.assertEqual(config.eligible_label_values, [1])
         self.assertTrue(notes)
 
     def test_a_current_file_is_read_as_it_is(self):
-        config, notes = self.load_legacy(schema_version=SCHEMA_VERSION, eligible_label_values=[2])
+        config, notes = self.load_stored(schema_version=SCHEMA_VERSION, eligible_label_values=[2])
         self.assertEqual(config.eligible_label_values, [2])
         self.assertEqual(notes, [])
 
     def test_the_store_upgrades_the_file_on_disk_and_logs_it(self):
         self.default_dataset()
         self.state_dir.mkdir(parents=True)
-        legacy = {"eligible_label_values": [2], "confirmed_label_value": 3, "lease_ttl_seconds": 7200}
-        (self.state_dir / "config.json").write_text(json.dumps(legacy), encoding="utf-8")
+        stored = {"schema_version": "0.2.0", "eligible_label_values": [2], "lease_ttl_seconds": 7200}
+        (self.state_dir / "config.json").write_text(json.dumps(stored), encoding="utf-8")
 
         store = self.make_store()
         self.assertEqual(store.config.eligible_label_values, [1])
@@ -140,13 +133,13 @@ class ConfigUpgradeTests(QCTestCase):
 
         saved = json.loads((self.state_dir / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["schema_version"], SCHEMA_VERSION)
-        self.assertNotIn("confirmed_label_value", saved)
-        self.assertIn("confirmed_label_value", (self.state_dir / "server.log").read_text(encoding="utf-8"))
+        self.assertEqual(saved["lease_ttl_seconds"], 7200)
+        self.assertIn("eligible_label_values", (self.state_dir / "server.log").read_text(encoding="utf-8"))
 
-    def test_an_environment_override_uses_the_new_statuses(self):
-        """docker-compose sets BONEHUB_QC_ELIGIBLE_LABEL_VALUES; it is not translated."""
+    def test_an_environment_override_is_read_in_the_current_statuses(self):
+        """docker-compose sets BONEHUB_QC_ELIGIBLE_LABEL_VALUES; it is taken as it is."""
         os.environ[f"{ENV_PREFIX}ELIGIBLE_LABEL_VALUES"] = "2"
-        config, _notes = self.load_legacy(eligible_label_values=[2])
+        config, _notes = self.load_stored(eligible_label_values=[1])
         self.assertEqual(config.eligible_label_values, [2])
 
 
@@ -198,12 +191,20 @@ class PathResolutionTests(QCTestCase):
             resolve_dataset_root()
         self.assertIn("DATASET_ROOT", str(ctx.exception))
 
-    def test_state_dir_defaults_to_a_hidden_folder_inside_the_dataset(self):
-        self.assertEqual(resolve_state_dir(self.dataset_root), self.dataset_root / ".bonehub_qc")
+    def test_state_root_defaults_to_a_hidden_folder_inside_the_dataset(self):
+        self.assertEqual(resolve_state_root(self.dataset_root), self.dataset_root / ".bonehub_qc")
 
-    def test_state_dir_name_is_overridable(self):
+    def test_state_root_name_is_overridable(self):
         os.environ[f"{ENV_PREFIX}STATE_DIR_NAME"] = "_qc"
-        self.assertEqual(resolve_state_dir(self.dataset_root), self.dataset_root / "_qc")
+        self.assertEqual(resolve_state_root(self.dataset_root), self.dataset_root / "_qc")
+
+    def test_the_credentials_folder_comes_from_the_environment(self):
+        os.environ[f"{ENV_PREFIX}CREDENTIALS_DIR"] = str(self.tmp_path / "keys")
+        self.assertEqual(resolve_credentials_dir(), self.tmp_path / "keys")
+
+    def test_the_credentials_folder_defaults_to_the_containers_own(self):
+        del os.environ[f"{ENV_PREFIX}CREDENTIALS_DIR"]
+        self.assertEqual(resolve_credentials_dir().as_posix(), DEFAULT_CREDENTIALS_DIR)
 
 
 if __name__ == "__main__":

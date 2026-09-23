@@ -31,7 +31,7 @@ class ApiTestCase(QCTestCase):
         with contextlib.redirect_stdout(io.StringIO()):  # the startup banner
             self.app = create_app(
                 dataset_root=self.dataset_root,
-                state_dir=self.state_dir,
+                credentials_dir=self.credentials_dir,
                 config=self.build_config(),
             )
         self.store = self.track(self.app.state.store)

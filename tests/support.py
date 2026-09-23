@@ -8,6 +8,10 @@ temporary folder, which is what the server is pointed at::
     <root>/Dataset_001/Image/001_000001.nii.gz
     <root>/Dataset_001/Segmentation/001_000001.seg.nrrd
 
+and a credentials folder beside it -- not inside it -- standing in for the container's
+credentials volume, with a fixed server id so the server's state folder on the "share" is
+known in advance: ``<root>/.bonehub_qc/qc_test_server/``.
+
 Masks are written and read with ``bonehub_data_schema``'s own functions, so the fixtures are
 in exactly the format the converters produce.
 """
@@ -35,6 +39,7 @@ from bonehub_data_schema import (
 )
 from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
+from bonehub_quality_check_server import auth
 from bonehub_quality_check_server.audit import AuditLog
 from bonehub_quality_check_server.config import ENV_PREFIX, QCServerConfig
 from bonehub_quality_check_server.store import QCStore
@@ -66,6 +71,9 @@ SHAPE = (6, 6, 6)
 SPACING = (1.0, 1.0, 1.0)
 
 LABEL_VALUE = {label.name: label.value for label in BoneLabelMap}
+
+#: The id of the server every test case runs, unless it makes another.
+TEST_SERVER_ID = "qc_test_server"
 
 
 def subject_key(dataset_id: int, subject_id: int) -> str:
@@ -133,7 +141,8 @@ def segment_header(*segments) -> dict:
 
 def labels_in_mask(path: Path) -> set:
     """Label names actually painted into a mask, read back through the schema."""
-    values = sitk.GetArrayViewFromImage(read_segmentation(path))
+    # A copy, not a view: a view would outlive the image it points into.
+    values = sitk.GetArrayFromImage(read_segmentation(path))
     return {BoneLabelMap(int(v)).name for v in np.unique(values) if int(v) != 0}
 
 
@@ -259,11 +268,23 @@ class QCTestCase(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="bonehub_qc_test_")
         self.tmp_path = Path(self._tmp)
         self.dataset_root = self.tmp_path / "BoneHub_Dataset"
-        self.state_dir = self.dataset_root / ".bonehub_qc"
+        self.credentials_dir = self.make_credentials_dir("credentials", TEST_SERVER_ID)
+        # What the Docker image sets, so code that reads the environment finds the folder.
+        os.environ[f"{ENV_PREFIX}CREDENTIALS_DIR"] = str(self.credentials_dir)
+        self.state_root = self.dataset_root / ".bonehub_qc"
+        self.state_dir = self.state_root / TEST_SERVER_ID
         self.builder = DatasetBuilder(self.dataset_root)
         self._stores: list = []
         self._upload_counter = itertools.count()
         self.addCleanup(self._cleanup)
+
+    def make_credentials_dir(self, name: str, server_id: str | None = None) -> Path:
+        """A credentials folder outside the dataset, as a container's volume would be."""
+        folder = self.tmp_path / name
+        folder.mkdir(parents=True)
+        if server_id is not None:
+            (folder / auth.SERVER_ID_FILE_NAME).write_text(server_id, encoding="utf-8")
+        return folder
 
     def _cleanup(self) -> None:
         for store in self._stores:
@@ -276,10 +297,15 @@ class QCTestCase(unittest.TestCase):
         self._stores.append(store)
         return store
 
-    def make_store(self, config: QCServerConfig | None = None, **config_kwargs) -> QCStore:
+    def make_store(
+        self, config: QCServerConfig | None = None, credentials_dir: Path | None = None, **config_kwargs
+    ) -> QCStore:
+        """A server on the test dataset; ``credentials_dir`` gives another server than the default."""
         if config is None and config_kwargs:
             config = QCServerConfig(**config_kwargs)
-        return self.track(QCStore(dataset_root=self.dataset_root, state_dir=self.state_dir, config=config))
+        return self.track(
+            QCStore(dataset_root=self.dataset_root, credentials_dir=credentials_dir or self.credentials_dir, config=config)
+        )
 
     def default_dataset(self, n_subjects: int = 3, dataset_id: int = 1) -> None:
         """One dataset whose subjects all carry segmentations not reviewed yet (status 1)."""

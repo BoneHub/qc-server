@@ -18,35 +18,51 @@ from tests.support import QCTestCase
 
 class PrivateKeyTests(QCTestCase):
     def test_a_private_key_is_generated_and_reused(self):
-        first = auth.load_or_create_private_key(self.state_dir)
+        first = auth.load_or_create_private_key(self.credentials_dir)
         self.assertTrue(first)
-        self.assertTrue((self.state_dir / auth.PRIVATE_KEY_FILE_NAME).exists())
-        self.assertEqual(auth.load_or_create_private_key(self.state_dir), first)
+        self.assertTrue((self.credentials_dir / auth.PRIVATE_KEY_FILE_NAME).exists())
+        self.assertEqual(auth.load_or_create_private_key(self.credentials_dir), first)
 
     def test_two_servers_get_different_private_keys(self):
-        other = self.tmp_path / "other_state"
+        other = self.tmp_path / "other_credentials"
         self.assertNotEqual(
-            auth.load_or_create_private_key(self.state_dir),
+            auth.load_or_create_private_key(self.credentials_dir),
             auth.load_or_create_private_key(other),
         )
 
     def test_the_environment_key_wins_over_the_stored_one(self):
-        auth.load_or_create_private_key(self.state_dir)
+        auth.load_or_create_private_key(self.credentials_dir)
         os.environ[auth.ENV_PRIVATE_KEY] = "a-fixed-private-key"
-        self.assertEqual(auth.load_or_create_private_key(self.state_dir), "a-fixed-private-key")
+        self.assertEqual(auth.load_or_create_private_key(self.credentials_dir), "a-fixed-private-key")
 
     def test_an_admin_key_is_generated_once_and_then_reused(self):
-        key, generated = auth.load_or_create_admin_key(self.state_dir)
+        key, generated = auth.load_or_create_admin_key(self.credentials_dir)
         self.assertTrue(generated)
-        again, generated_again = auth.load_or_create_admin_key(self.state_dir)
+        again, generated_again = auth.load_or_create_admin_key(self.credentials_dir)
         self.assertEqual(again, key)
         self.assertFalse(generated_again)
 
     def test_an_admin_key_from_the_environment_is_not_reported_as_generated(self):
         os.environ[auth.ENV_ADMIN_KEY] = "chosen-by-the-administrator"
-        key, generated = auth.load_or_create_admin_key(self.state_dir)
+        key, generated = auth.load_or_create_admin_key(self.credentials_dir)
         self.assertEqual(key, "chosen-by-the-administrator")
         self.assertFalse(generated)
+        self.assertFalse((self.credentials_dir / auth.ADMIN_KEY_FILE_NAME).exists(), "a chosen key is not stored")
+
+
+class ServerIdTests(QCTestCase):
+    def test_a_new_credentials_folder_is_a_new_server(self):
+        server_id, generated = auth.load_or_create_server_id(self.tmp_path / "fresh")
+        self.assertTrue(generated)
+        self.assertTrue(server_id.startswith("qc_"))
+        self.assertEqual(auth.load_or_create_server_id(self.tmp_path / "fresh"), (server_id, False))
+        self.assertNotEqual(auth.load_or_create_server_id(self.tmp_path / "other")[0], server_id)
+
+    def test_a_server_id_that_is_not_a_safe_folder_name_is_refused(self):
+        """The id names a folder on the share, so it must not climb out of it."""
+        folder = self.make_credentials_dir("tampered", "../../escape")
+        with self.assertRaises(RuntimeError):
+            auth.load_or_create_server_id(folder)
 
 
 class ApiKeyTests(unittest.TestCase):
@@ -85,7 +101,7 @@ class UserAccountTests(QCTestCase):
         self.assertEqual(user.name, "alice")
         self.assertTrue(api_key.startswith(auth.API_KEY_PREFIX))
 
-        raw = (self.state_dir / "users.json").read_text(encoding="utf-8")
+        raw = (self.credentials_dir / "users.json").read_text(encoding="utf-8")
         self.assertNotIn(api_key, raw)
         self.assertIn(user.key_hash, raw)
 
@@ -206,9 +222,35 @@ class UserAccountTests(QCTestCase):
 
     def test_the_users_file_is_valid_json_on_disk(self):
         self.store.create_user("alice")
-        entries = json.loads((self.state_dir / "users.json").read_text(encoding="utf-8"))
+        entries = json.loads((self.credentials_dir / "users.json").read_text(encoding="utf-8"))
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["name"], "alice")
+
+
+class AccountsChangedByAnotherProcessTests(QCTestCase):
+    """The CLI runs in the container next to the live server, on the same credentials."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.default_dataset()
+        self.server = self.make_store()
+        self.cli = self.make_store()  # a second process on the same credentials folder
+
+    def test_a_reviewer_added_by_the_cli_can_log_in_at_once(self):
+        _, api_key = self.cli.create_user("alice")
+        self.assertEqual(self.server.authenticate(api_key).name, "alice")
+
+    def test_the_server_does_not_erase_a_reviewer_the_cli_added(self):
+        _, alice_key = self.cli.create_user("alice")
+        self.server.create_user("bob")
+        self.assertEqual(sorted(u["name"] for u in self.make_store().list_users()), ["alice", "bob"])
+        self.assertEqual(self.server.authenticate(alice_key).name, "alice")
+
+    def test_a_key_rotated_by_the_cli_stops_working_on_the_server(self):
+        _, old_key = self.server.create_user("alice")
+        self.cli.rotate_user_key("alice")
+        with self.assertRaises(QCError):
+            self.server.authenticate(old_key)
 
 
 if __name__ == "__main__":

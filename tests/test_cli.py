@@ -62,9 +62,24 @@ class CommandLineTests(QCTestCase):
         with self.assertRaises(Exception):
             store.authenticate(old)
 
-    def test_show_admin_key_prints_the_stored_key(self):
+    def test_show_admin_key_prints_the_key_kept_in_the_container(self):
         printed = self.cli("show-admin-key").strip()
-        self.assertEqual(printed, (self.state_dir / "admin_key").read_text(encoding="utf-8").strip())
+        self.assertEqual(printed, (self.credentials_dir / "admin_key").read_text(encoding="utf-8").strip())
+
+    def test_sessions_lists_the_servers_of_the_dataset(self):
+        self.cli("stats")
+        other = self.make_credentials_dir("other_credentials", "qc_other_server")
+        self.cli("stats", "--credentials-dir", str(other))
+        output = self.cli("sessions")
+        self.assertIn("qc_other_server", output)
+        this_server = next(line for line in output.splitlines() if "qc_test_server" in line)
+        self.assertIn("<- this server", this_server)
+
+    def test_the_credentials_folder_comes_from_the_environment(self):
+        """Inside the container: BONEHUB_QC_CREDENTIALS_DIR, set by the image."""
+        self.cli("add-user", "--name", "alice")
+        self.assertTrue((self.credentials_dir / "users.json").exists())
+        self.assertFalse((self.state_dir / "users.json").exists())
 
     def test_stats_prints_the_queue(self):
         output = self.cli("stats")
@@ -115,7 +130,7 @@ class CommandLineTests(QCTestCase):
         # temporary folder so Windows lets it be deleted.
         import logging
 
-        prefix = f"bonehub_quality_check_server.{self.state_dir.resolve().as_posix()}"
+        prefix = f"bonehub_quality_check_server.{self.state_root.resolve().as_posix()}"
         for name in [n for n in list(logging.Logger.manager.loggerDict) if n.startswith(prefix)]:
             logger = logging.getLogger(name)
             for handler in list(logger.handlers):

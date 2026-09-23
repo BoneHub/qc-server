@@ -1,11 +1,19 @@
-# BoneHub Dataset Quality Check server.
+# check=skip=SecretsUsedInArgOrEnv
+# (The check trips over the name BONEHUB_QC_CREDENTIALS_DIR, which holds a folder path,
+# not a secret. The keys themselves never pass through ARG or ENV in this file.)
+#
+# BoneHub Dataset Quality Check server. Run it with docker compose (see docker-compose.yml
+# and the README); Docker is the only supported way to run the server.
 #
 # The image carries only the data schema from BoneHub-Dataset, with its [io] extra
 # (numpy, SimpleITK) for reading and writing .seg.nrrd segmentations, plus FastAPI.
 # Nothing from the conversion or segmentation stack is installed.
 #
-#   docker build -t bonehub-qc-server .
-#   docker run -p 8000:8000 -v /path/to/BoneHub_Dataset:/data bonehub-qc-server
+# Two mounts:
+#   /data                 the dataset, read-write. The server keeps its non-secret state
+#                         in /data/.bonehub_qc/<server id>/.
+#   /var/lib/bonehub-qc   the server's credentials: its id, private key, admin key and
+#                         reviewer accounts. A volume on the Docker host, never the share.
 
 FROM python:3.11-slim
 
@@ -23,8 +31,11 @@ RUN pip install --no-cache-dir . \
     && apt-get purge -y git \
     && apt-get autoremove -y
 
-# The dataset folder is mounted here; all server state lives in /data/.bonehub_qc.
+# Readable by the server alone.
+RUN mkdir -p /var/lib/bonehub-qc && chmod 700 /var/lib/bonehub-qc
+
 ENV BONEHUB_QC_DATASET_ROOT=/data \
+    BONEHUB_QC_CREDENTIALS_DIR=/var/lib/bonehub-qc \
     BONEHUB_QC_HOST=0.0.0.0 \
     BONEHUB_QC_PORT=8000 \
     PYTHONUNBUFFERED=1

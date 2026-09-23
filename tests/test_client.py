@@ -37,7 +37,7 @@ class LiveServerTestCase(QCTestCase):
         super().setUp()
         self.default_dataset(n_subjects=self.n_subjects)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.app = create_app(dataset_root=self.dataset_root, state_dir=self.state_dir)
+            self.app = create_app(dataset_root=self.dataset_root, credentials_dir=self.credentials_dir)
         self.store = self.track(self.app.state.store)
 
         self.port = free_port()

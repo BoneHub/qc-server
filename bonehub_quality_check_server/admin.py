@@ -46,9 +46,11 @@ def check_session(store: QCStore = Depends(require_admin)) -> dict:
     """Used by the panel to validate the key the administrator typed in."""
     return {
         "status": "ok",
+        "server_id": store.server_id,
         "dataset_root": str(store.dataset_root),
         "state_dir": str(store.state_dir),
         "config": store.config.model_dump(),
+        "sessions": store.sessions(),
     }
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -9,24 +10,27 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 
-from . import __version__, admin, api
-from .config import QCServerConfig, resolve_dataset_root, resolve_state_dir
+from . import __version__, admin, api, auth
+from .config import QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_state_root
 from .store import QCError, QCStore
+
+#: How an administrator reaches the CLI of the running container.
+EXEC_CLI = "docker compose exec bonehub-qc-server bonehub-qc-server"
 
 
 def create_app(
     dataset_root: Path | None = None,
-    state_dir: Path | None = None,
+    credentials_dir: Path | None = None,
     config: QCServerConfig | None = None,
 ) -> FastAPI:
     """Build the application around one dataset root.
 
-    ``dataset_root`` defaults to ``BONEHUB_QC_DATASET_ROOT`` so that
-    ``uvicorn bonehub_quality_check_server.app:app`` works inside the container with no
-    arguments of its own.
+    ``dataset_root`` defaults to ``BONEHUB_QC_DATASET_ROOT`` and ``credentials_dir`` to
+    ``BONEHUB_QC_CREDENTIALS_DIR``, so that ``uvicorn bonehub_quality_check_server.app:app``
+    works inside the container with no arguments of its own.
     """
     dataset_root = Path(dataset_root) if dataset_root else resolve_dataset_root()
-    state_dir = Path(state_dir) if state_dir else resolve_state_dir(dataset_root)
+    credentials_dir = Path(credentials_dir) if credentials_dir else resolve_credentials_dir()
 
     app = FastAPI(
         title="BoneHub Dataset Quality Check",
@@ -36,7 +40,13 @@ def create_app(
             "segmentations back into the dataset folder."
         ),
     )
-    app.state.store = QCStore(dataset_root=dataset_root, state_dir=state_dir, config=config)
+    app.state.store = QCStore(
+        dataset_root=dataset_root,
+        credentials_dir=credentials_dir,
+        config=config,
+        state_root=resolve_state_root(dataset_root),
+    )
+    app.state.store.mark_started()
 
     app.include_router(api.router)
     app.include_router(admin.router)
@@ -56,6 +66,7 @@ def create_app(
             "status": "ok",
             "version": __version__,
             "schema_version": SCHEMA_VERSION,
+            "server_id": app.state.store.server_id,
             "dataset_root": str(app.state.store.dataset_root),
         }
 
@@ -64,28 +75,48 @@ def create_app(
 
 
 def _announce(store: QCStore) -> None:
-    """Print the startup banner, including the admin key when it was just generated."""
+    """Print the startup banner, with the admin key when this server has just generated it.
+
+    The banner goes to the container's output only. What is logged to the share leaves the
+    key out.
+    """
     stats = store.stats()
-    lines = [
-        "BoneHub Dataset Quality Check server",
-        f"  dataset root : {store.dataset_root}",
-        f"  state folder : {store.state_dir}",
-        f"  eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
+    details = [
+        f"server id    : {store.server_id}" + (" (new server)" if store.server_created else ""),
+        f"dataset root : {store.dataset_root}",
+        f"state folder : {store.state_dir}",
+        f"credentials  : {store.credentials_dir} (inside the container)",
+        f"eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
         f"(label statuses {store.config.eligible_label_values})",
-        f"  reviewers    : {len(store.list_users())}",
-        f"  data schema  : {SCHEMA_VERSION}",
-        "  admin panel  : /admin",
+        f"reviewers    : {len(store.list_users())}",
+        f"data schema  : {SCHEMA_VERSION}",
     ]
-    if store.admin_key_generated:
+    lines = ["BoneHub Dataset Quality Check server", *(f"  {line}" for line in details), "  admin panel  : /admin"]
+
+    if os.environ.get(auth.ENV_ADMIN_KEY):
+        lines.append("  admin key    : BONEHUB_QC_ADMIN_KEY from .env")
+    elif store.admin_key_generated:
         lines += [
             "",
-            "  A new admin key was generated for this dataset folder:",
+            "  A new admin key was generated for this server:",
             f"      {store.admin_key}",
-            f"  It is stored in '{store.state_dir / 'admin_key'}'.",
-            "  Set BONEHUB_QC_ADMIN_KEY to choose your own instead.",
+            f"  It is kept inside the container, in '{store.credentials_dir / auth.ADMIN_KEY_FILE_NAME}', and is",
+            "  not printed again. To print it later:",
+            f"      {EXEC_CLI} show-admin-key",
+            "  To choose your own instead, set BONEHUB_QC_ADMIN_KEY in .env.",
+        ]
+    else:
+        lines.append(f"  admin key    : kept inside the container; `{EXEC_CLI} show-admin-key` prints it")
+
+    if store.credentials_on_share:
+        lines += [
+            "",
+            "  WARNING: credentials of an older server are on the dataset share, where they are not safe:",
+            *(f"      {path}" for path in store.credentials_on_share),
+            "  This server does not use them. Delete them from the share.",
         ]
     print("\n".join(lines), flush=True)
-    store.audit.event("Server started. " + " | ".join(line.strip() for line in lines[1:6]))
+    store.audit.event("Server started. " + " | ".join(details))
 
 
 # Module-level `app` so `uvicorn bonehub_quality_check_server.app:app` works. It is built

@@ -192,7 +192,7 @@ class MalformedDatasetTests(QCTestCase):
             self.track(
                 __import__("bonehub_quality_check_server.store", fromlist=["QCStore"]).QCStore(
                     dataset_root=self.tmp_path / "nowhere",
-                    state_dir=self.state_dir,
+                    credentials_dir=self.credentials_dir,
                 )
             )
 
@@ -215,16 +215,19 @@ class IndexRefreshTests(QCTestCase):
 
 
 class StateFolderTests(QCTestCase):
-    """Everything the server owns lives inside the dataset folder."""
+    """The server's non-secret state lives in a folder of its own inside the dataset."""
 
     def test_the_state_folder_is_laid_out_on_first_start(self):
         self.default_dataset()
         store = self.make_store()
-        for name in ["config.json", "server_private_key", "admin_key"]:
+        self.assertEqual(store.state_dir, self.dataset_root / ".bonehub_qc" / "qc_test_server")
+        for name in ["config.json", "session.json"]:
             self.assertTrue((self.state_dir / name).exists(), name)
         for name in ["backups", "tmp"]:
             self.assertTrue((self.state_dir / name).is_dir(), name)
-        self.assertEqual(store.state_dir, self.state_dir)
+        for name in ["server_private_key", "admin_key"]:
+            self.assertTrue((self.credentials_dir / name).exists(), name)
+            self.assertFalse((self.state_dir / name).exists(), f"{name} must not be on the share")
 
     def test_the_config_file_is_written_so_it_can_be_edited_later(self):
         self.default_dataset()

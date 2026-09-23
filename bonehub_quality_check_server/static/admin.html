@@ -119,8 +119,9 @@
       <button class="primary" id="loginBtn">Sign in</button>
     </div>
     <p class="muted" style="margin-bottom:0">
-      The key is printed on first start and stored in
-      <code>&lt;dataset&gt;/.bonehub_qc/admin_key</code>.
+      A new server prints its key once, at its first start, unless <code>BONEHUB_QC_ADMIN_KEY</code>
+      in <code>.env</code> sets it. The key is kept inside the container; print it again with
+      <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
     </p>
   </section>
 
@@ -305,7 +306,8 @@
       try { window.sessionStorage.setItem(KEY_STORAGE, key); } catch (e) { /* private mode */ }
       $("login").hidden = true;
       $("panel").hidden = false;
-      $("datasetRoot").textContent = session.dataset_root;
+      $("datasetRoot").textContent = session.dataset_root + "  ·  server " + session.server_id +
+        ((session.sessions || []).length > 1 ? "  (" + session.sessions.length + " servers use this dataset)" : "");
       fillConfig(session.config);
       return refreshAll();
     });
@@ -337,6 +339,7 @@
       ["Eligible", stats.eligible_subjects],
       ["Available", stats.available],
       ["Assigned", stats.assigned],
+      ["On other servers", stats.assigned_by_other_servers],
       ["Confirmed", stats.confirmed],
       ["Rejected", stats.rejected],
       ["Subjects total", stats.total_subjects]
