@@ -13,9 +13,10 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server.app import create_app
 
-from tests.support import LABEL_VALUE, QCTestCase, segmentation_array, write_nifti
+from tests.support import LABEL_VALUE, QCTestCase, write_mask
 
 
 class ApiTestCase(QCTestCase):
@@ -67,8 +68,8 @@ class ApiTestCase(QCTestCase):
         body = {"quality_check_confirmed": confirmed, **metadata}
         files = {"metadata": (None, json.dumps(body))}
         if labels is not None:
-            payload = write_nifti(self.tmp_path / "post.nii.gz", segmentation_array(labels)).read_bytes()
-            files["segmentation"] = ("segmentation.nii.gz", payload, "application/gzip")
+            payload = write_mask(self.tmp_path / "post.seg.nrrd", labels).read_bytes()
+            files["segmentation"] = ("segmentation.seg.nrrd", payload, "application/octet-stream")
         return self.client.post(
             f"/api/v1/assignments/{assignment_id}/submit", files=files, headers=self.headers(api_key)
         )
@@ -88,7 +89,8 @@ class HealthAndAuthTests(ApiTestCase):
     def test_ping_reports_the_reviewer_and_the_policy(self):
         body = self.client.get("/api/v1/ping", headers=self.headers(self.alice_key)).json()
         self.assertEqual(body["user"], "alice")
-        self.assertEqual(body["confirmed_label_value"], 3)
+        self.assertEqual(body["confirmed_label_status"], 2)
+        self.assertEqual(body["schema_version"], SCHEMA_VERSION, "the extension checks it before loading anything")
 
     def test_every_client_endpoint_rejects_a_missing_key(self):
         for method, path in [
@@ -112,7 +114,11 @@ class HealthAndAuthTests(ApiTestCase):
     def test_the_label_map_is_served_to_clients(self):
         body = self.client.get("/api/v1/labels", headers=self.headers(self.alice_key)).json()
         self.assertEqual(body["label_name_to_value"]["FEMUR_LEFT"], LABEL_VALUE["FEMUR_LEFT"])
-        self.assertIn("3", body["valid_availability_values"])
+        self.assertNotIn("BACKGROUND", body["label_name_to_value"], "no segment can be background")
+        self.assertEqual(sorted(body["label_status_values"]), ["0", "1", "2"])
+        self.assertEqual(body["confirmed_label_status"], 2)
+        self.assertEqual(body["segmentation_suffix"], ".seg.nrrd")
+        self.assertEqual(body["schema_version"], SCHEMA_VERSION)
 
 
 class HandoutTests(ApiTestCase):
@@ -121,7 +127,7 @@ class HandoutTests(ApiTestCase):
         self.assertEqual(handout["subject_key"], "001_000001")
         self.assertTrue(handout["has_image"])
         self.assertTrue(handout["has_segmentation"])
-        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(handout["segmentation_labels"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.assertEqual(handout["label_values"]["FEMUR_LEFT"], LABEL_VALUE["FEMUR_LEFT"])
         self.assertEqual(handout["subject_info"]["subject_id"], 1)
         self.assertEqual(handout["dataset_info"]["dataset_id"], 1)
@@ -203,7 +209,7 @@ class NoSegmentationHandoutTests(ApiTestCase):
 
 
 class SubmitOverHttpTests(ApiTestCase):
-    def test_a_confirmed_submission_promotes_the_labels_to_three(self):
+    def test_a_confirmed_submission_marks_the_labels_reviewed(self):
         handout = self.next_subject(self.alice_key)
         response = self.submit(self.alice_key, handout["assignment_id"], True, ["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.assertEqual(response.status_code, 200, response.text)
@@ -212,8 +218,8 @@ class SubmitOverHttpTests(ApiTestCase):
         self.assertTrue(body["quality_check_confirmed"])
         self.assertEqual(body["state"], "confirmed")
         self.assertTrue(body["segmentation_written"])
-        self.assertEqual(body["updated_labels"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+        self.assertEqual(body["updated_labels"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
 
     def test_a_rejected_submission_changes_nothing(self):
         before = self.builder.all_subject_info(1)
@@ -244,14 +250,14 @@ class SubmitOverHttpTests(ApiTestCase):
             ["FEMUR_LEFT", "FEMUR_RIGHT"],
             confirmed_labels=["FEMUR_LEFT"],
         )
-        self.assertEqual(response.json()["updated_labels"], {"FEMUR_LEFT": 3})
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 2})
+        self.assertEqual(response.json()["updated_labels"], {"FEMUR_LEFT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1})
 
     def test_confirming_without_a_file_is_a_400(self):
         handout = self.next_subject(self.alice_key)
         response = self.submit(self.alice_key, handout["assignment_id"], True)
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
     def test_malformed_metadata_is_a_400(self):
         handout = self.next_subject(self.alice_key)
@@ -277,12 +283,12 @@ class SubmitOverHttpTests(ApiTestCase):
             f"/api/v1/assignments/{handout['assignment_id']}/submit",
             files={
                 "metadata": (None, json.dumps({"quality_check_confirmed": True})),
-                "segmentation": ("seg.nii.gz", b"garbage", "application/gzip"),
+                "segmentation": ("seg.seg.nrrd", b"garbage", "application/octet-stream"),
             },
             headers=self.headers(self.alice_key),
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
     def test_an_upload_over_the_size_cap_is_refused(self):
         self.store.config.max_upload_bytes = 64
@@ -319,8 +325,8 @@ class FullClientRoundTripTests(ApiTestCase):
         self.submit(self.alice_key, alice_handout["assignment_id"], True, ["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.submit(self.bob_key, bob_handout["assignment_id"], False, comment="motion artefacts")
 
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
-        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
         log = self.builder.dataset_log(1).read_text(encoding="utf-8")
         self.assertIn("alice", log)

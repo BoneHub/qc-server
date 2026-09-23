@@ -80,7 +80,7 @@ class ClientHappyPathTests(LiveServerTestCase):
 
         image = self.client.download_image(handout["assignment_id"], self.tmp_path / "work" / "image.nii.gz")
         segmentation = self.client.download_segmentation(
-            handout["assignment_id"], self.tmp_path / "work" / "seg.nii.gz"
+            handout["assignment_id"], self.tmp_path / "work" / "segmentation.seg.nrrd"
         )
         self.assertEqual(image.read_bytes(), self.builder.image_file(1, 1).read_bytes())
         self.assertEqual(segmentation.read_bytes(), self.builder.segmentation_file(1, 1).read_bytes())
@@ -90,8 +90,8 @@ class ClientHappyPathTests(LiveServerTestCase):
             handout["assignment_id"], quality_check_confirmed=True, segmentation_path=reviewed, comment="looks good"
         )
         self.assertTrue(result["quality_check_confirmed"])
-        self.assertEqual(result["updated_labels"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+        self.assertEqual(result["updated_labels"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
 
     def test_a_rejection_needs_no_file_and_changes_nothing(self):
         before = self.builder.all_subject_info(1)
@@ -108,8 +108,8 @@ class ClientHappyPathTests(LiveServerTestCase):
             segmentation_path=self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]),
             confirmed_labels=["FEMUR_RIGHT"],
         )
-        self.assertEqual(result["updated_labels"], {"FEMUR_RIGHT": 3})
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 3})
+        self.assertEqual(result["updated_labels"], {"FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 2})
 
     def test_assignments_can_be_listed_and_re_read(self):
         handout = self.client.next_subject()
@@ -170,7 +170,7 @@ class ClientErrorTests(LiveServerTestCase):
         with self.assertRaises(QCClientError) as ctx:
             self.client.submit(handout["assignment_id"], quality_check_confirmed=True)
         self.assertIsNone(ctx.exception.status_code)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
 
     def test_a_segmentation_path_that_does_not_exist_is_caught_locally(self):
         handout = self.client.next_subject()
@@ -178,7 +178,7 @@ class ClientErrorTests(LiveServerTestCase):
             self.client.submit(
                 handout["assignment_id"],
                 quality_check_confirmed=True,
-                segmentation_path=self.tmp_path / "missing.nii.gz",
+                segmentation_path=self.tmp_path / "missing.seg.nrrd",
             )
         self.assertIn("does not exist", str(ctx.exception))
 
@@ -211,7 +211,7 @@ class ClientSubjectWithoutSegmentationTests(LiveServerTestCase):
         self.assertIsNone(handout["segmentation_url"])
 
         with self.assertRaises(QCClientError) as ctx:
-            self.client.download_segmentation(handout["assignment_id"], self.tmp_path / "seg.nii.gz")
+            self.client.download_segmentation(handout["assignment_id"], self.tmp_path / "seg.seg.nrrd")
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_a_segmentation_created_from_scratch_is_stored(self):
@@ -222,7 +222,7 @@ class ClientSubjectWithoutSegmentationTests(LiveServerTestCase):
             segmentation_path=self.upload_file(["FEMUR_LEFT"]),
         )
         self.assertTrue(self.builder.segmentation_file(1, 9).exists())
-        self.assertEqual(self.builder.subject_info(1, 9)["segmentation"], {"FEMUR_LEFT": 3})
+        self.assertEqual(self.builder.subject_info(1, 9)["segmentation"], {"FEMUR_LEFT": 2})
 
 
 if __name__ == "__main__":

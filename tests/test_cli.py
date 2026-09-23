@@ -73,8 +73,8 @@ class CommandLineTests(QCTestCase):
 
     def test_show_config_prints_the_policy(self):
         output = self.cli("show-config")
-        self.assertIn("confirmed_label_value: 3", output)
-        self.assertIn("eligible_label_values: [2]", output)
+        self.assertIn("eligible_label_values: [1]", output)
+        self.assertIn("mark_removed_labels_absent: True", output)
 
     def test_the_dataset_root_can_come_from_the_environment(self):
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)

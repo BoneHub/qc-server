@@ -57,7 +57,7 @@ class EnvironmentStartupTests(QCTestCase):
 
     def test_the_policy_is_taken_from_the_environment(self):
         for dataset_id in (1, 2, 3):
-            self.builder.add_subject(dataset_id, 1, segmentation={"FEMUR_LEFT": 2})
+            self.builder.add_subject(dataset_id, 1, segmentation={"FEMUR_LEFT": 1})
         os.environ[f"{ENV_PREFIX}DATASET_ROOT"] = str(self.dataset_root)
         os.environ[f"{ENV_PREFIX}ALLOWED_DATASET_IDS"] = "1,3"
         os.environ[f"{ENV_PREFIX}LEASE_TTL_SECONDS"] = "600"

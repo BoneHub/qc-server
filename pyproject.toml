@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bonehub-dataset-quality-check-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "Server that distributes BoneHub subjects to 3D Slicer reviewers and writes confirmed segmentations back into the dataset."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -12,16 +12,18 @@ authors = [
     {name = "Hamid Alavi"}
 ]
 
-# Only the data schema is taken from BoneHub-Dataset: its base install is deliberately
-# lean (pydantic alone), so none of the conversion or segmentation stack is pulled in.
+# Only the data schema is taken from BoneHub-Dataset, with its [io] extra (numpy and
+# SimpleITK) for reading and writing .seg.nrrd segmentations; none of the conversion or
+# segmentation stack is pulled in. The server is written for schema 0.3 and refuses to
+# start with another (see config.WRITTEN_FOR_SCHEMA).
 dependencies = [
-    "bonehub-dataset @ git+https://github.com/BoneHub/BoneHub-Dataset.git",
+    "bonehub-dataset[io] @ git+https://github.com/BoneHub/BoneHub-Dataset.git",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "python-multipart>=0.0.9",
     "pydantic>=2.0",
-    "nibabel>=5.0",
     "numpy>=1.24",
+    "SimpleITK>=2.2",
 ]
 
 [project.optional-dependencies]

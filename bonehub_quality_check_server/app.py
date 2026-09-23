@@ -7,6 +7,8 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
+from bonehub_data_schema import __version__ as SCHEMA_VERSION
+
 from . import __version__, admin, api
 from .config import QCServerConfig, resolve_dataset_root, resolve_state_dir
 from .store import QCError, QCStore
@@ -50,7 +52,12 @@ def create_app(
     @app.get("/health", tags=["server"])
     def health() -> dict:
         """Unauthenticated liveness probe, used by the container healthcheck."""
-        return {"status": "ok", "version": __version__, "dataset_root": str(app.state.store.dataset_root)}
+        return {
+            "status": "ok",
+            "version": __version__,
+            "schema_version": SCHEMA_VERSION,
+            "dataset_root": str(app.state.store.dataset_root),
+        }
 
     _announce(app.state.store)
     return app
@@ -64,8 +71,9 @@ def _announce(store: QCStore) -> None:
         f"  dataset root : {store.dataset_root}",
         f"  state folder : {store.state_dir}",
         f"  eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
-        f"(label values {store.config.eligible_label_values})",
+        f"(label statuses {store.config.eligible_label_values})",
         f"  reviewers    : {len(store.list_users())}",
+        f"  data schema  : {SCHEMA_VERSION}",
         "  admin panel  : /admin",
     ]
     if store.admin_key_generated:

@@ -76,7 +76,7 @@ class ConcurrentHandoutTests(QCTestCase):
         stored = self.builder.all_subject_info(1)
         self.assertEqual(len(stored), 6, "a concurrent write dropped a subject from the file")
         for entry in stored:
-            self.assertEqual(entry["segmentation"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+            self.assertEqual(entry["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
 
     def test_concurrent_user_creation_keeps_every_reviewer(self):
         self.default_dataset(n_subjects=1)

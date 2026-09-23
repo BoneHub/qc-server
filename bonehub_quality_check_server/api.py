@@ -8,6 +8,8 @@ from the admin panel. The flow a client follows is:
 3. ``GET  /api/v1/assignments/{id}/image``        - download the image
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - download the segmentation, if any
 5. ``POST /api/v1/assignments/{id}/submit``       - send the verdict back
+
+Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways.
 """
 
 from __future__ import annotations
@@ -18,8 +20,9 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
 from fastapi.responses import FileResponse
 
-from bonehub_data_schema.subject_info import VALID_LABEL_VALUES
+from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
 
+from .config import STATUS_REVIEWED
 from .models import Assignment, SubjectHandout, SubmissionRequest, SubmissionResult, User
 from .store import LABEL_NAME_TO_VALUE, QCError, QCStore
 
@@ -46,9 +49,10 @@ def ping(request: Request, user: User = Depends(get_user)) -> dict:
     return {
         "status": "ok",
         "server": "bonehub-dataset-quality-check-server",
+        "schema_version": SCHEMA_VERSION,
         "user": user.name,
         "allowed_dataset_ids": user.allowed_dataset_ids,
-        "confirmed_label_value": store.config.confirmed_label_value,
+        "confirmed_label_status": STATUS_REVIEWED,
         "lease_ttl_seconds": store.config.lease_ttl_seconds,
         "max_concurrent_assignments": store.config.max_concurrent_assignments_per_user,
     }
@@ -56,10 +60,13 @@ def ping(request: Request, user: User = Depends(get_user)) -> dict:
 
 @router.get("/labels")
 def labels(user: User = Depends(get_user)) -> dict:
-    """The BoneHub label map, so the client can name segments and restore voxel values."""
+    """The BoneHub label map and label statuses, so the client can name and check segments."""
     return {
+        "schema_version": SCHEMA_VERSION,
         "label_name_to_value": LABEL_NAME_TO_VALUE,
-        "valid_availability_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
+        "label_status_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
+        "confirmed_label_status": STATUS_REVIEWED,
+        "segmentation_suffix": SEGMENTATION_SUFFIX,
     }
 
 
@@ -93,17 +100,18 @@ def download_image(assignment_id: str, request: Request, user: User = Depends(ge
     path = store.image_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"The image for {assignment.subject_key} is missing on the server.", status_code=404)
-    return _nifti_response(path)
+    return FileResponse(path, media_type="application/gzip", filename=path.name)
 
 
 @router.get("/assignments/{assignment_id}/segmentation")
 def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_user)) -> FileResponse:
+    """The stored segmentation, as the dataset keeps it (``.seg.nrrd``)."""
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
     path = store.segmentation_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"Subject {assignment.subject_key} has no segmentation yet.", status_code=404)
-    return _nifti_response(path)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 @router.post("/assignments/{assignment_id}/extend", response_model=Assignment)
@@ -124,14 +132,14 @@ async def submit(
     request: Request,
     metadata: str = Form(..., description="JSON body matching SubmissionRequest"),
     segmentation: UploadFile | None = File(
-        None, description="The reviewed segmentation as .nii.gz; required when confirming"
+        None, description="The reviewed segmentation as .seg.nrrd, on the image's voxel grid; required when confirming"
     ),
     user: User = Depends(get_user),
 ) -> SubmissionResult:
     """Receive a reviewer's verdict.
 
-    ``quality_check_confirmed=true`` stores the uploaded segmentation and promotes the
-    reviewed labels in ``Subject_info_XXX.json`` to the confirmed value (3 by default).
+    ``quality_check_confirmed=true`` stores the uploaded segmentation and sets the reviewed
+    labels in ``Subject_info_XXX.json`` to status 2, "available, reviewed and corrected".
     ``false`` leaves the dataset untouched and only writes the audit trail.
     """
     store = get_store(request)
@@ -156,7 +164,7 @@ async def submit(
             comment=payload.comment,
         )
     finally:
-        # A confirmed submission moves the file into place; anything left behind is waste.
+        # The dataset receives a rewritten copy, so the upload itself is never kept.
         if tmp_path is not None and tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
@@ -194,10 +202,6 @@ def _handout(store: QCStore, assignment: Assignment) -> SubjectHandout:
         image_url=f"{base}/image",
         segmentation_url=f"{base}/segmentation" if has_segmentation else None,
     )
-
-
-def _nifti_response(path: Path) -> FileResponse:
-    return FileResponse(path, media_type="application/gzip", filename=path.name)
 
 
 async def _spool_upload(store: QCStore, upload: UploadFile) -> Path:

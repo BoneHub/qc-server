@@ -2,9 +2,9 @@
 BoneHub Dataset Quality Check - server.
 
 Points at a folder that is already in BoneHub data structure format, hands subjects out
-to authenticated 3D Slicer reviewers, and receives reviewed segmentations back. When a
-reviewer confirms the quality, the corresponding label values in ``Subject_info_XXX.json``
-are promoted to ``3`` ("available, ..., passed quality check").
+to authenticated 3D Slicer reviewers, and receives reviewed segmentations (``.seg.nrrd``)
+back. When a reviewer confirms the quality, the reviewed labels in
+``Subject_info_XXX.json`` are set to status ``2`` ("available, reviewed and corrected").
 """
 
 from .config import QCServerConfig
@@ -18,5 +18,5 @@ __all__ = [
     "User",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "Hamid Alavi"

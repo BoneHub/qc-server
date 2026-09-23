@@ -146,7 +146,7 @@ class LeaseTests(QCTestCase):
 class RequeuePolicyTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
 
     def test_a_rejected_subject_stays_out_of_the_queue_by_default(self):
         store = self.make_store(requeue_rejected=False)

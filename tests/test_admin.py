@@ -37,7 +37,7 @@ class AdminAuthTests(ApiTestCase):
         body = self.client.get("/admin/api/session", headers=self.admin_headers).json()
         self.assertEqual(body["status"], "ok")
         self.assertEqual(body["dataset_root"], str(self.dataset_root))
-        self.assertEqual(body["config"]["confirmed_label_value"], 3)
+        self.assertEqual(body["config"]["eligible_label_values"], [1])
 
 
 class AdminUserManagementTests(ApiTestCase):
@@ -174,7 +174,7 @@ class AdminMonitoringTests(ApiTestCase):
         self.assertEqual(entries[0]["comment"], "clean")
 
     def test_the_index_can_be_rebuilt_on_demand(self):
-        self.builder.add_subject(1, 99, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(1, 99, segmentation={"FEMUR_LEFT": 1})
         body = self.client.post("/admin/api/refresh-index", headers=self.admin_headers).json()
         self.assertEqual(body["eligible_subjects"], 4)
 
@@ -196,14 +196,14 @@ class AdminConfigTests(ApiTestCase):
         self.assertEqual(QCServerConfig.load(self.state_dir / "config.json").lease_ttl_seconds, 300)
 
     def test_a_policy_change_takes_effect_at_once(self):
-        """Narrowing the eligible values must re-scope the queue immediately."""
-        self.client.put("/admin/api/config", json={"eligible_label_values": [1]}, headers=self.admin_headers)
+        """Narrowing the eligible statuses must re-scope the queue immediately."""
+        self.client.put("/admin/api/config", json={"eligible_label_values": [2]}, headers=self.admin_headers)
         self.assertEqual(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["eligible_subjects"], 0)
         self.assertEqual(self.client.post("/api/v1/subjects/next", headers=self.headers(self.alice_key)).status_code,
                          404)
 
     def test_restricting_the_served_datasets_at_runtime_works(self):
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
         self.client.post("/admin/api/refresh-index", headers=self.admin_headers)
         self.assertEqual(
             sorted(self.client.get("/admin/api/stats", headers=self.admin_headers).json()["datasets"]), ["1", "2"]
@@ -217,10 +217,16 @@ class AdminConfigTests(ApiTestCase):
         response = self.client.put("/admin/api/config", json={"nonsense": 1}, headers=self.admin_headers)
         self.assertEqual(response.status_code, 400)
 
-    def test_an_invalid_label_value_is_refused(self):
-        response = self.client.put(
-            "/admin/api/config", json={"confirmed_label_value": 42}, headers=self.admin_headers
-        )
+    def test_an_invalid_label_status_is_refused(self):
+        for statuses in ([3], [0], [42]):
+            response = self.client.put(
+                "/admin/api/config", json={"eligible_label_values": statuses}, headers=self.admin_headers
+            )
+            self.assertEqual(response.status_code, 400, statuses)
+
+    def test_the_retired_confirmed_value_setting_is_refused(self):
+        """Confirmed labels are always status 2, so there is nothing left to set."""
+        response = self.client.put("/admin/api/config", json={"confirmed_label_value": 2}, headers=self.admin_headers)
         self.assertEqual(response.status_code, 400)
 
 

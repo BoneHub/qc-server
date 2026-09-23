@@ -65,7 +65,7 @@ class SubjectHandout(BaseModel):
     has_image: bool
     has_segmentation: bool
     segmentation_labels: dict[str, int] = Field(
-        default_factory=dict, description="Label name -> current availability value in Subject_info"
+        default_factory=dict, description="Label name -> current label status in Subject_info (0, 1 or 2)"
     )
     label_values: dict[str, int] = Field(
         default_factory=dict, description="Label name -> BoneLabelMap voxel value, for the labels of this subject"
@@ -79,7 +79,7 @@ class SubjectHandout(BaseModel):
 class SubmissionRequest(BaseModel):
     """Body of a submission, sent as the ``metadata`` part of a multipart request."""
 
-    quality_check_confirmed: bool = Field(..., description="True promotes the reviewed labels to the confirmed value")
+    quality_check_confirmed: bool = Field(..., description="True sets the reviewed labels to status 2 (reviewed)")
     confirmed_labels: list[str] | None = Field(
         None,
         description=(

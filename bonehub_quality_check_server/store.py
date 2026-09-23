@@ -13,6 +13,9 @@ Everything the server owns lives in ``<dataset_root>/<state_dir>/``::
     |-- backups/              previous segmentations, kept before overwriting
     `-- tmp/                  uploads being validated
 
+Only datasets written under this server's ``bonehub_data_schema`` version are served: in
+another version the label values, label statuses and segmentation format may differ.
+
 A single re-entrant lock serialises state and dataset writes. The work is human-paced,
 so the simplicity is worth more than the concurrency; run the server with one worker.
 """
@@ -30,16 +33,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
-import nibabel as nib
-import numpy as np
-
-from bonehub_data_schema import BoneLabelMap, DatasetInfo, SubjectInfo
+from bonehub_data_schema import (
+    SEGMENTATION_SUFFIX,
+    BoneLabelMap,
+    DatasetInfo,
+    SubjectInfo,
+    __version__ as SCHEMA_VERSION,
+    is_compatible_schema_version,
+)
 from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
 from . import auth
 from .audit import AuditLog, utc_now_iso
-from .config import CONFIG_FILE_NAME, QCServerConfig
+from .config import CONFIG_FILE_NAME, STATUS_NOT_AVAILABLE, STATUS_NOT_REVIEWED, STATUS_REVIEWED, QCServerConfig
 from .models import TERMINAL_STATES, Assignment, QueueStats, User
+from .segmentation import SegmentationError, UploadedSegmentation, read_segmentation_upload, write_segmentation
 
 USERS_FILE_NAME = "users.json"
 ASSIGNMENTS_FILE_NAME = "assignments.json"
@@ -49,8 +57,8 @@ TMP_DIR_NAME = "tmp"
 #: Marker for an argument that was not supplied, where ``None`` is itself a valid value.
 UNSET = object()
 
-LABEL_NAME_TO_VALUE: dict[str, int] = {label.name: label.value for label in BoneLabelMap}
-LABEL_VALUE_TO_NAME: dict[int, str] = {label.value: label.name for label in BoneLabelMap}
+#: Every label a segment can be, which leaves out BACKGROUND.
+LABEL_NAME_TO_VALUE: dict[str, int] = {label.name: label.value for label in BoneLabelMap if label.value != 0}
 
 
 class QCError(Exception):
@@ -95,14 +103,15 @@ class QCStore:
         (self.state_dir / BACKUP_DIR_NAME).mkdir(exist_ok=True)
         (self.state_dir / TMP_DIR_NAME).mkdir(exist_ok=True)
 
+        self.audit = AuditLog(self.dataset_root, self.state_dir)
+
         self.config_path = self.state_dir / CONFIG_FILE_NAME
-        self.config = config or QCServerConfig.load(self.config_path)
+        self.config = config or QCServerConfig.load(self.config_path, notify=self.audit.event)
         self.config.save(self.config_path)
 
         self.private_key = auth.load_or_create_private_key(self.state_dir)
         self.admin_key, self.admin_key_generated = auth.load_or_create_admin_key(self.state_dir)
 
-        self.audit = AuditLog(self.dataset_root, self.state_dir)
         self._lock = threading.RLock()
 
         self._users: dict[str, User] = self._load_users()
@@ -132,7 +141,8 @@ class QCStore:
 
     def segmentation_path(self, dataset_id: int, subject_id: int) -> Path:
         """Where the segmentation belongs, whether or not it exists yet."""
-        return self.dataset_path(dataset_id) / "Segmentation" / f"{subject_key_of(dataset_id, subject_id)}.nii.gz"
+        key = subject_key_of(dataset_id, subject_id)
+        return self.dataset_path(dataset_id) / "Segmentation" / f"{key}{SEGMENTATION_SUFFIX}"
 
     # ------------------------------------------------------------------ index
     def refresh_index(self) -> None:
@@ -152,11 +162,24 @@ class QCStore:
             if self.config.allowed_dataset_ids is not None and dataset_id not in self.config.allowed_dataset_ids:
                 continue
 
+            try:
+                info = self._read_dataset_info(dataset_id)
+            except Exception as exc:
+                self.audit.event(f"Skipping '{dataset_dir.name}': its Dataset_info file could not be read: {exc}")
+                continue
+            if not is_compatible_schema_version(info.get("schema_version")):
+                self.audit.event(
+                    f"Skipping '{dataset_dir.name}': it was written with schema version "
+                    f"{info.get('schema_version') or '(not recorded)'}, but this server reads {SCHEMA_VERSION}. "
+                    "Regenerate the dataset with the current converters."
+                )
+                continue
+
             subjects = self._read_subject_info(dataset_id, missing_ok=True)
             if subjects is None:
                 continue
             total += len(subjects)
-            dataset_info[dataset_id] = self._read_dataset_info(dataset_id)
+            dataset_info[dataset_id] = info
 
             for subject in subjects:
                 if subject.subject_id is None:
@@ -203,10 +226,10 @@ class QCStore:
     def _is_eligible(self, subject: SubjectInfo) -> bool:
         if not subject.image:
             return False
-        segmentation = subject.segmentation or {}
-        if not segmentation:
+        # Labels recorded with status 0 are not available, so they do not make a segmentation.
+        if not subject.available_labels("segmentation"):
             return self.config.include_subjects_without_segmentation
-        return any(value in self.config.eligible_label_values for value in segmentation.values())
+        return any(status in self.config.eligible_label_values for status in subject.segmentation.values())
 
     # ------------------------------------------------------------------ users
     @property
@@ -539,6 +562,16 @@ class QCStore:
             cached = self._dataset_info.get(dataset_id)
         return cached if cached is not None else self._read_dataset_info(dataset_id)
 
+    def _require_compatible_dataset(self, dataset_id: int) -> None:
+        """Refuse to write into a dataset that was regenerated under another schema meanwhile."""
+        version = self._read_dataset_info(dataset_id).get("schema_version")
+        if not is_compatible_schema_version(version):
+            raise QCError(
+                f"Dataset {dataset_id} is now at schema version {version or '(not recorded)'}, but this server "
+                f"writes {SCHEMA_VERSION}; the submission was not applied.",
+                status_code=409,
+            )
+
     def subject_info(self, dataset_id: int, subject_id: int) -> SubjectInfo:
         subjects = self._read_subject_info(dataset_id)
         for subject in subjects or []:
@@ -568,46 +601,14 @@ class QCStore:
         return target
 
     # ------------------------------------------------------------- submission
-    def inspect_segmentation(self, seg_path: Path, dataset_id: int, subject_id: int) -> dict[str, int]:
-        """Validate an uploaded segmentation and return the labels it contains.
-
-        Returns ``{label_name: voxel_value}`` for every non-background value present.
-        """
+    def inspect_segmentation(self, seg_path: Path, dataset_id: int, subject_id: int) -> UploadedSegmentation:
+        """Validate an uploaded ``.seg.nrrd``; its ``labels`` are the labels it contains."""
+        image_file = self.image_path(dataset_id, subject_id)
+        check_against = image_file if self.config.require_geometry_match and image_file.exists() else None
         try:
-            seg_img = nib.load(str(seg_path))
-            seg_data = np.asanyarray(seg_img.dataobj)
-        except Exception as exc:
-            raise QCError(f"The uploaded segmentation could not be read as NIfTI: {exc}") from exc
-
-        if self.config.require_geometry_match:
-            image_file = self.image_path(dataset_id, subject_id)
-            if image_file.exists():
-                image_img = nib.load(str(image_file))
-                if tuple(seg_img.shape[:3]) != tuple(image_img.shape[:3]):
-                    raise QCError(
-                        f"Segmentation shape {tuple(seg_img.shape[:3])} does not match the image "
-                        f"{tuple(image_img.shape[:3])}."
-                    )
-                if not np.allclose(seg_img.affine, image_img.affine, atol=1e-3):
-                    raise QCError("The segmentation affine does not match the image affine.")
-
-        labels: dict[str, int] = {}
-        unknown: list[int] = []
-        for raw_value in np.unique(seg_data):
-            value = int(round(float(raw_value)))
-            if value == 0:
-                continue
-            name = LABEL_VALUE_TO_NAME.get(value)
-            if name is None:
-                unknown.append(value)
-            else:
-                labels[name] = value
-        if unknown:
-            raise QCError(
-                f"The segmentation contains voxel values that are not BoneHub labels: {sorted(unknown)}. "
-                f"See 'bonehub_data_schema/labelmap.py'."
-            )
-        return labels
+            return read_segmentation_upload(seg_path, check_against)
+        except SegmentationError as exc:
+            raise QCError(str(exc)) from exc
 
     def submit(
         self,
@@ -637,7 +638,8 @@ class QCStore:
             raise QCError("A confirmed submission must include the reviewed segmentation file.")
 
         # Validation is the expensive part, so it happens before the lock is taken.
-        present_labels = self.inspect_segmentation(segmentation_tmp_path, dataset_id, subject_id)
+        upload = self.inspect_segmentation(segmentation_tmp_path, dataset_id, subject_id)
+        present_labels = upload.labels
         if not present_labels:
             raise QCError("The uploaded segmentation is empty; there is nothing to confirm.")
 
@@ -652,7 +654,15 @@ class QCStore:
                 raise QCError(f"These confirmed labels are not present in the uploaded segmentation: {missing}.")
             labels_to_confirm = sorted(set(confirmed_labels))
 
-        return self._finish_confirmed(assignment, segmentation_tmp_path, present_labels, labels_to_confirm, comment)
+        self._require_compatible_dataset(dataset_id)
+        # The dataset gets the canonical form of the upload. Writing it is slow too, so it is
+        # staged here and only moved into place under the lock.
+        staged_path = self.new_upload_path(prefix="staged")
+        try:
+            write_segmentation(upload, staged_path)
+            return self._finish_confirmed(assignment, staged_path, present_labels, labels_to_confirm, comment)
+        finally:
+            staged_path.unlink(missing_ok=True)
 
     def _finish_rejected(self, assignment: Assignment, comment: str | None) -> "SubmissionOutcome":
         with self._lock:
@@ -693,42 +703,42 @@ class QCStore:
     def _finish_confirmed(
         self,
         assignment: Assignment,
-        segmentation_tmp_path: Path,
+        staged_path: Path,
         present_labels: dict[str, int],
         labels_to_confirm: list[str],
         comment: str | None,
     ) -> "SubmissionOutcome":
         dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
         target_path = self.segmentation_path(dataset_id, subject_id)
-        confirmed_value = self.config.confirmed_label_value
 
         with self._lock:
             previous = self.subject_info(dataset_id, subject_id).segmentation or {}
             backup_path = self._backup_segmentation(target_path) if target_path.exists() else None
 
             target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(segmentation_tmp_path), str(target_path))
+            shutil.move(str(staged_path), str(target_path))
 
-            # A label the reviewer deleted from a confirmed segmentation is a confirmed
-            # absence, which is what value 0 means.
+            # A label the reviewer deleted from a confirmed segmentation is no longer available.
             removed_labels = [
-                label for label, value in previous.items() if label not in present_labels and value not in {0, -1}
+                label
+                for label, status in previous.items()
+                if label not in present_labels and status != STATUS_NOT_AVAILABLE
             ]
-            updated_labels = {label: confirmed_value for label in labels_to_confirm}
+            updated_labels = {label: STATUS_REVIEWED for label in labels_to_confirm}
 
             def apply(subject: SubjectInfo) -> None:
                 for label in labels_to_confirm:
-                    subject.set_segmentation_value(label, confirmed_value)
-                # Labels present but not vouched for keep the value they already had, and
-                # are recorded as value 2 if the reviewer introduced them.
+                    subject.set_segmentation_value(label, STATUS_REVIEWED)
+                # Labels present but not vouched for keep the status they already had; one the
+                # dataset did not have yet is recorded as available but not reviewed.
                 for label in present_labels:
                     if label in labels_to_confirm:
                         continue
-                    if not subject.segmentation or label not in subject.segmentation:
-                        subject.set_segmentation_value(label, 2)
+                    if (subject.segmentation or {}).get(label, STATUS_NOT_AVAILABLE) == STATUS_NOT_AVAILABLE:
+                        subject.set_segmentation_value(label, STATUS_NOT_REVIEWED)
                 if self.config.mark_removed_labels_absent:
                     for label in removed_labels:
-                        subject.set_segmentation_value(label, 0)
+                        subject.set_segmentation_value(label, STATUS_NOT_AVAILABLE)
 
             self._mutate_subject_info(dataset_id, subject_id, apply)
 
@@ -766,7 +776,7 @@ class QCStore:
             dataset_id=dataset_id,
             summary=(
                 f"Subject {assignment.subject_key} confirmed by '{assignment.user}': "
-                f"{len(labels_to_confirm)} label(s) set to {confirmed_value} "
+                f"{len(labels_to_confirm)} label(s) set to {STATUS_REVIEWED} (reviewed) "
                 f"({', '.join(labels_to_confirm)}); segmentation written to '{target_path}'."
                 + (f" Removed: {', '.join(assignment.removed_labels)}." if assignment.removed_labels else "")
                 + (f" Comment: {comment}" if comment else "")
@@ -777,7 +787,7 @@ class QCStore:
             updated_labels=updated_labels,
             removed_labels=assignment.removed_labels or [],
             backup_path=assignment.backup_path,
-            message=f"Confirmed. {len(labels_to_confirm)} label(s) set to {confirmed_value} in Subject_info.",
+            message=f"Confirmed. {len(labels_to_confirm)} label(s) set to {STATUS_REVIEWED} (reviewed) in Subject_info.",
         )
 
     def _backup_segmentation(self, target_path: Path) -> Path | None:
@@ -786,13 +796,14 @@ class QCStore:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_dir = self.state_dir / BACKUP_DIR_NAME / target_path.parent.parent.name
         backup_dir.mkdir(parents=True, exist_ok=True)
-        stem = target_path.name[: -len(".nii.gz")] if target_path.name.endswith(".nii.gz") else target_path.stem
-        backup_path = backup_dir / f"{stem}_{stamp}.nii.gz"
+        name = target_path.name
+        stem = name[: -len(SEGMENTATION_SUFFIX)] if name.endswith(SEGMENTATION_SUFFIX) else target_path.stem
+        backup_path = backup_dir / f"{stem}_{stamp}{SEGMENTATION_SUFFIX}"
         shutil.copy2(target_path, backup_path)
         return backup_path
 
-    def new_upload_path(self) -> Path:
-        return self.state_dir / TMP_DIR_NAME / f"upload_{uuid.uuid4().hex}.nii.gz"
+    def new_upload_path(self, prefix: str = "upload") -> Path:
+        return self.state_dir / TMP_DIR_NAME / f"{prefix}_{uuid.uuid4().hex}{SEGMENTATION_SUFFIX}"
 
     # ------------------------------------------------------------------ stats
     def stats(self) -> QueueStats:

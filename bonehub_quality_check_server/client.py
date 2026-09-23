@@ -7,8 +7,12 @@ Python is fragile. Keep it dependency-free.
     client = BoneHubQCClient("http://localhost:8000", "bhqc_...")
     handout = client.next_subject()
     client.download_image(handout["assignment_id"], Path("image.nii.gz"))
+    client.download_segmentation(handout["assignment_id"], Path("segmentation.seg.nrrd"))
     client.submit(handout["assignment_id"], quality_check_confirmed=True,
-                  segmentation_path=Path("reviewed.nii.gz"))
+                  segmentation_path=Path("reviewed.seg.nrrd"))
+
+Segmentations go both ways in BoneHub's segmentation format (``.seg.nrrd``); the server
+refuses an upload in any other format.
 """
 
 from __future__ import annotations
@@ -48,7 +52,7 @@ class BoneHubQCClient:
         return self._request("GET", "/api/v1/ping")
 
     def labels(self) -> dict:
-        """The BoneHub label map: ``{'label_name_to_value': {...}, ...}``."""
+        """The BoneHub label map and label statuses: ``{'label_name_to_value': {...}, ...}``."""
         return self._request("GET", "/api/v1/labels")
 
     def next_subject(self) -> dict:

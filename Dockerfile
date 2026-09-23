@@ -1,7 +1,7 @@
 # BoneHub Dataset Quality Check server.
 #
-# The image carries only the data schema from BoneHub-Dataset (its base install is
-# pydantic-only), plus FastAPI and nibabel for validating submitted segmentations.
+# The image carries only the data schema from BoneHub-Dataset, with its [io] extra
+# (numpy, SimpleITK) for reading and writing .seg.nrrd segmentations, plus FastAPI.
 # Nothing from the conversion or segmentation stack is installed.
 #
 #   docker build -t bonehub-qc-server .

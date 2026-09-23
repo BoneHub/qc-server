@@ -1,8 +1,9 @@
 """What a submission does to the dataset.
 
 The central requirement: "if quality_check_confirmed = True is given by the client, the
-label values for those bones must be changed to 3 meaning that they have been quality
-checked. quality_check_confirmed = False then basically server must not make any changes."
+labels of those bones must be marked as reviewed. quality_check_confirmed = False then
+basically server must not make any changes." In the label statuses of the BoneHub schema,
+reviewed is status 2, whatever status the label had before.
 """
 
 from __future__ import annotations
@@ -13,10 +14,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
+import SimpleITK as sitk
 
+from bonehub_data_schema import read_segmentation_labels
 from bonehub_quality_check_server.store import QCError
 
-from tests.support import QCTestCase, write_nifti
+from tests.support import LABEL_VALUE, QCTestCase, segment_header, write_image, write_raw_mask
 
 
 class ConfirmedSubmissionTests(QCTestCase):
@@ -24,18 +27,18 @@ class ConfirmedSubmissionTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.assignment = self.store.next_subject(self.alice)
 
-    def test_confirmed_labels_become_three_in_subject_info(self):
+    def test_confirmed_labels_become_reviewed_in_subject_info(self):
         upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"])
         outcome = self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
 
-        self.assertEqual(outcome.updated_labels, {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+        self.assertEqual(outcome.updated_labels, {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
         stored = self.builder.subject_info(1, 1)["segmentation"]
-        self.assertEqual(stored, {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+        self.assertEqual(stored, {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
 
     def test_the_reviewed_segmentation_replaces_the_one_in_the_dataset(self):
         upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
@@ -45,53 +48,54 @@ class ConfirmedSubmissionTests(QCTestCase):
             {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"},
         )
 
-    def test_only_the_labels_the_reviewer_vouches_for_are_promoted(self):
+    def test_only_the_labels_the_reviewer_vouches_for_are_marked_reviewed(self):
         upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"])
         self.store.submit(self.assignment.assignment_id, self.alice, True, upload, confirmed_labels=["FEMUR_LEFT"])
         stored = self.builder.subject_info(1, 1)["segmentation"]
-        self.assertEqual(stored["FEMUR_LEFT"], 3)
-        self.assertEqual(stored["FEMUR_RIGHT"], 2, "an unvouched label keeps the value it had")
+        self.assertEqual(stored["FEMUR_LEFT"], 2)
+        self.assertEqual(stored["FEMUR_RIGHT"], 1, "an unvouched label keeps the status it had")
 
-    def test_a_label_the_reviewer_added_is_recorded_as_unchecked(self):
-        """A new bone drawn but not confirmed is 'available, generated, without QC'."""
+    def test_a_label_the_reviewer_added_is_recorded_as_not_reviewed(self):
+        """A new bone drawn but not confirmed is 'available, not reviewed or corrected'."""
         upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "SACRUM"])
         self.store.submit(self.assignment.assignment_id, self.alice, True, upload, confirmed_labels=["FEMUR_LEFT"])
         stored = self.builder.subject_info(1, 1)["segmentation"]
-        self.assertEqual(stored["SACRUM"], 2)
+        self.assertEqual(stored["SACRUM"], 1)
 
-    def test_a_label_the_reviewer_added_and_confirmed_is_promoted(self):
+    def test_a_label_the_reviewer_added_and_confirmed_is_marked_reviewed(self):
         upload = self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "SACRUM"])
         self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["SACRUM"], 3)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["SACRUM"], 2)
 
-    def test_a_label_the_reviewer_deleted_becomes_a_confirmed_absence(self):
-        """Value 0 means 'not available, confirmed'."""
+    def test_a_label_the_reviewer_deleted_becomes_not_available(self):
+        """Status 0 means 'not available'."""
         upload = self.upload_file(["FEMUR_LEFT"])
         outcome = self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
         self.assertEqual(outcome.removed_labels, ["FEMUR_RIGHT"])
         stored = self.builder.subject_info(1, 1)["segmentation"]
-        self.assertEqual(stored, {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 0})
+        self.assertEqual(stored, {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0})
 
     def test_removed_labels_can_be_left_untouched_by_policy(self):
         store = self.make_store(mark_removed_labels_absent=False)
         alice = store._users["alice"]
         assignment = store.get_assignment(self.assignment.assignment_id)
         store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_RIGHT"], 2)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_RIGHT"], 1)
 
     def test_the_previous_segmentation_is_backed_up_before_being_overwritten(self):
         upload = self.upload_file(["FEMUR_LEFT"])
         outcome = self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
         self.assertIsNotNone(outcome.backup_path)
-        backups = list((self.state_dir / "backups").rglob("*.nii.gz"))
+        backups = list((self.state_dir / "backups").rglob("*.seg.nrrd"))
         self.assertEqual(len(backups), 1)
+        self.assertTrue(backups[0].name.startswith("001_000001_"))
 
     def test_backups_can_be_switched_off(self):
         store = self.make_store(keep_segmentation_backups=False)
         alice = store._users["alice"]
         outcome = store.submit(self.assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertIsNone(outcome.backup_path)
-        self.assertEqual(list((self.state_dir / "backups").rglob("*.nii.gz")), [])
+        self.assertEqual(list((self.state_dir / "backups").rglob("*.seg.nrrd")), [])
 
     def test_the_assignment_is_closed_as_confirmed(self):
         self.store.submit(self.assignment.assignment_id, self.alice, True, self.upload_file(["FEMUR_LEFT"]))
@@ -101,19 +105,20 @@ class ConfirmedSubmissionTests(QCTestCase):
         self.assertTrue(assignment.segmentation_written)
         self.assertIsNotNone(assignment.submitted_at)
 
-    def test_the_confirmed_value_is_configurable(self):
-        store = self.make_store(confirmed_label_value=1)
-        alice = store._users["alice"]
-        store.submit(self.assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]))
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_LEFT"], 1)
-
     def test_a_confirmed_subject_leaves_the_queue(self):
         self.store.submit(self.assignment.assignment_id, self.alice, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertEqual(self.store.stats().available, 0)
         self.assertEqual([ref.subject_key for ref in self.store._index], [])
 
+    def test_the_upload_itself_is_left_for_the_caller(self):
+        """The dataset receives a rewritten copy; the API layer deletes its own spooled file."""
+        upload = self.upload_file(["FEMUR_LEFT"])
+        self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+        self.assertTrue(upload.exists())
+        self.assertEqual(list((self.state_dir / "tmp").glob("*")), [])
+
     def test_other_subject_fields_are_preserved(self):
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2}, age=44, gender="F", imaging_modality="CT")
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1}, age=44, gender="F", imaging_modality="CT")
         store = self.make_store()
         alice = store._users["alice"]
         # Finish the subject held from setUp, so the next request hands out subject 2.
@@ -124,15 +129,112 @@ class ConfirmedSubmissionTests(QCTestCase):
 
         entry = self.builder.subject_info(1, 2)
         self.assertEqual((entry["age"], entry["gender"], entry["imaging_modality"]), (44, "F", "CT"))
-        self.assertEqual(entry["segmentation"], {"FEMUR_LEFT": 3})
+        self.assertEqual(entry["segmentation"], {"FEMUR_LEFT": 2})
 
     def test_other_subjects_in_the_file_are_untouched(self):
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
         store = self.make_store()
         alice = store._users["alice"]
         store.submit(self.assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]))
-        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 2})
+        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 1})
         self.assertEqual(len(self.builder.all_subject_info(1)), 2)
+
+
+class StatusTransitionTests(QCTestCase):
+    """Confirmation always ends at status 2, whatever status a label started from."""
+
+    def confirm(self, segmentation: dict, painted: list, confirmed: list | None = None) -> dict:
+        self.builder.add_subject(1, 1, segmentation=segmentation)
+        store = self.make_store(eligible_label_values=[1, 2])
+        alice = store.create_user("alice")[0]
+        assignment = store.next_subject(alice)
+        store.submit(assignment.assignment_id, alice, True, self.upload_file(painted), confirmed_labels=confirmed)
+        return self.builder.subject_info(1, 1)["segmentation"]
+
+    def test_an_already_reviewed_label_stays_reviewed(self):
+        stored = self.confirm({"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1}, ["FEMUR_LEFT", "FEMUR_RIGHT"])
+        self.assertEqual(stored, {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+
+    def test_a_label_recorded_as_not_available_but_painted_and_confirmed_is_reviewed(self):
+        stored = self.confirm({"FEMUR_LEFT": 1, "SACRUM": 0}, ["FEMUR_LEFT", "SACRUM"])
+        self.assertEqual(stored["SACRUM"], 2)
+
+    def test_a_label_recorded_as_not_available_but_painted_unconfirmed_is_not_reviewed(self):
+        """Painted means available: status 0 would contradict the file."""
+        stored = self.confirm({"FEMUR_LEFT": 1, "SACRUM": 0}, ["FEMUR_LEFT", "SACRUM"], confirmed=["FEMUR_LEFT"])
+        self.assertEqual(stored, {"FEMUR_LEFT": 2, "SACRUM": 1})
+
+    def test_a_label_already_not_available_is_not_reported_as_removed(self):
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "SACRUM": 0})
+        store = self.make_store()
+        alice = store.create_user("alice")[0]
+        assignment = store.next_subject(alice)
+        outcome = store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
+        self.assertEqual(outcome.removed_labels, [])
+
+
+class StoredFormatTests(QCTestCase):
+    """What reaches the dataset is the canonical BoneHub segmentation, whatever was sent."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.store = self.make_store()
+        self.alice = self.store.create_user("alice")[0]
+        self.assignment = self.store.next_subject(self.alice)
+
+    def stored_header(self) -> dict:
+        reader = sitk.ImageFileReader()
+        reader.SetFileName(str(self.builder.segmentation_file(1, 1)))
+        reader.ReadImageInformation()
+        return {key: reader.GetMetaData(key) for key in reader.GetMetaDataKeys()}
+
+    def test_the_stored_mask_is_a_bonehub_seg_nrrd(self):
+        self.store.submit(self.assignment.assignment_id, self.alice, True, self.upload_file(["FEMUR_LEFT", "SACRUM"]))
+        path = self.builder.segmentation_file(1, 1)
+        self.assertTrue(path.name.endswith(".seg.nrrd"))
+        self.assertEqual(read_segmentation_labels(path), ["SACRUM", "FEMUR_LEFT"], "numbered in label map order")
+        header = self.stored_header()
+        self.assertEqual(header["Segment1_Tags"], f"BoneHubLabel:FEMUR_LEFT|BoneHubValue:{LABEL_VALUE['FEMUR_LEFT']}|")
+
+    def test_an_upload_numbered_its_own_way_is_renumbered(self):
+        """Segments named only, numbered 7 and 3, listed out of order: stored as 1 and 2."""
+        numbers = np.zeros((6, 6, 6), dtype=np.uint8)
+        numbers[0, 0:2, 0:2] = 7
+        numbers[3, 0:2, 0:2] = 3
+        upload = write_raw_mask(
+            self.upload_path(), numbers, segment_header((7, "FEMUR_RIGHT", None), (3, "FEMUR_LEFT", None))
+        )
+        self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+
+        header = self.stored_header()
+        self.assertEqual((header["Segment0_Name"], header["Segment0_LabelValue"]), ("FEMUR_LEFT", "1"))
+        self.assertEqual((header["Segment1_Name"], header["Segment1_LabelValue"]), ("FEMUR_RIGHT", "2"))
+        self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_LEFT", "FEMUR_RIGHT"})
+
+    def test_segments_of_one_label_are_merged(self):
+        numbers = np.zeros((6, 6, 6), dtype=np.uint8)
+        numbers[0, 0:2, 0:2] = 1
+        numbers[3, 0:2, 0:2] = 2
+        copy_tags = f"BoneHubValue:{LABEL_VALUE['FEMUR_LEFT']}|"
+        header = segment_header((1, "FEMUR_LEFT", None), (2, "FEMUR_LEFT_copy", copy_tags))
+        upload = write_raw_mask(self.upload_path(), numbers, header)
+        self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+        self.assertEqual(read_segmentation_labels(self.builder.segmentation_file(1, 1)), ["FEMUR_LEFT"])
+
+    def test_the_stored_mask_takes_the_images_exact_geometry(self):
+        """A client that rounds the geometry within tolerance must not shift the dataset's mask."""
+        numbers = np.zeros((6, 6, 6), dtype=np.uint8)
+        numbers[0, 0:2, 0:2] = 1
+        header = segment_header((1, "FEMUR_LEFT", None))
+        upload = write_raw_mask(self.upload_path(), numbers, header, spacing=(1.0002, 1.0002, 1.0002))
+        self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+
+        stored = sitk.ReadImage(str(self.builder.segmentation_file(1, 1)))
+        image = sitk.ReadImage(str(self.builder.image_file(1, 1)))
+        self.assertEqual(stored.GetSpacing(), image.GetSpacing())
+        self.assertEqual(stored.GetOrigin(), image.GetOrigin())
+        self.assertEqual(stored.GetDirection(), image.GetDirection())
 
 
 class RejectedSubmissionTests(QCTestCase):
@@ -140,7 +242,7 @@ class RejectedSubmissionTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.assignment = self.store.next_subject(self.alice)
@@ -164,7 +266,7 @@ class RejectedSubmissionTests(QCTestCase):
 
     def test_no_backup_is_taken(self):
         self.store.submit(self.assignment.assignment_id, self.alice, False, None)
-        self.assertEqual(list((self.state_dir / "backups").rglob("*.nii.gz")), [])
+        self.assertEqual(list((self.state_dir / "backups").rglob("*.seg.nrrd")), [])
 
     def test_the_assignment_is_closed_as_rejected(self):
         outcome = self.store.submit(self.assignment.assignment_id, self.alice, False, None, comment="too noisy")
@@ -178,14 +280,31 @@ class RejectedSubmissionTests(QCTestCase):
 class SubmissionValidationTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
         self.assignment = self.store.next_subject(self.alice)
+        self.before_bytes = self.builder.segmentation_file(1, 1).read_bytes()
 
     def assert_dataset_untouched(self) -> None:
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.before_bytes)
+
+    def assert_refused(self, upload: Path, *fragments: str) -> None:
+        with self.assertRaises(QCError) as ctx:
+            self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+        self.assertEqual(ctx.exception.status_code, 400)
+        for fragment in fragments:
+            self.assertIn(fragment, ctx.exception.message)
+        self.assert_dataset_untouched()
+
+    def mask(self, *segments, numbers: np.ndarray | None = None) -> Path:
+        if numbers is None:
+            numbers = np.zeros((6, 6, 6), dtype=np.uint8)
+            for index, (number, _name, _tags) in enumerate(segments):
+                numbers[index, 0:2, 0:2] = number
+        return write_raw_mask(self.upload_path(), numbers, segment_header(*segments))
 
     def test_confirming_without_a_file_is_refused(self):
         with self.assertRaises(QCError):
@@ -193,50 +312,67 @@ class SubmissionValidationTests(QCTestCase):
         self.assert_dataset_untouched()
 
     def test_an_empty_segmentation_cannot_be_confirmed(self):
-        upload = self.upload_file([])
-        with self.assertRaises(QCError) as ctx:
-            self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
-        self.assertIn("empty", ctx.exception.message)
-        self.assert_dataset_untouched()
+        self.assert_refused(self.upload_file([]), "empty")
 
-    def test_a_file_that_is_not_nifti_is_refused(self):
-        bad = self.tmp_path / "not_a_nifti.nii.gz"
-        bad.write_bytes(b"this is not a NIfTI file")
-        with self.assertRaises(QCError) as ctx:
-            self.store.submit(self.assignment.assignment_id, self.alice, True, bad)
-        self.assertIn("NIfTI", ctx.exception.message)
-        self.assert_dataset_untouched()
+    def test_a_file_that_is_not_a_segmentation_is_refused(self):
+        bad = self.tmp_path / "not_a_mask.seg.nrrd"
+        bad.write_bytes(b"this is not a NRRD file")
+        self.assert_refused(bad, ".seg.nrrd")
 
-    def test_voxel_values_that_are_not_bonehub_labels_are_refused(self):
-        bad = self.tmp_path / "unknown_values.nii.gz"
-        data = np.zeros((6, 6, 6), dtype=np.int16)
-        data[0, 0, 0] = 31337
-        write_nifti(bad, data)
-        with self.assertRaises(QCError) as ctx:
-            self.store.submit(self.assignment.assignment_id, self.alice, True, bad)
-        self.assertIn("31337", ctx.exception.message)
-        self.assert_dataset_untouched()
+    def test_a_nifti_segmentation_of_the_old_format_is_refused(self):
+        old = write_image(self.tmp_path / "old_client_upload.nii.gz")
+        self.assert_refused(old, ".seg.nrrd")
+
+    def test_a_segment_that_is_not_a_bonehub_label_is_refused(self):
+        self.assert_refused(self.mask((1, "FEMUR_LEFT", None), (2, "MY_SCRATCH_SEGMENT", None)), "MY_SCRATCH_SEGMENT")
+
+    def test_background_is_not_a_label_a_segment_can_be(self):
+        self.assert_refused(self.mask((1, "BACKGROUND", None)), "BACKGROUND")
+
+    def test_a_tag_naming_no_bonehub_label_is_refused(self):
+        self.assert_refused(self.mask((1, "Segment_1", "BoneHubValue:31337|")), "31337")
+
+    def test_a_tag_is_enough_to_name_a_segment(self):
+        """As in the schema's reader: the BoneHubValue tag, else the segment name."""
+        upload = self.mask((1, "Segment_1", f"BoneHubValue:{LABEL_VALUE['FEMUR_LEFT']}|"))
+        outcome = self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
+        self.assertEqual(outcome.updated_labels, {"FEMUR_LEFT": 2})
+
+    def test_a_segment_named_one_label_and_tagged_another_is_refused(self):
+        tags = f"BoneHubLabel:FEMUR_LEFT|BoneHubValue:{LABEL_VALUE['FEMUR_LEFT']}|"
+        self.assert_refused(self.mask((1, "FEMUR_RIGHT", tags)), "FEMUR_RIGHT", "FEMUR_LEFT")
+
+    def test_voxels_the_header_does_not_describe_are_refused(self):
+        numbers = np.zeros((6, 6, 6), dtype=np.uint8)
+        numbers[0, 0:2, 0:2] = 1
+        numbers[1, 0:2, 0:2] = 5
+        self.assert_refused(self.mask((1, "FEMUR_LEFT", None), numbers=numbers), "[5]")
+
+    def test_two_labels_sharing_a_segment_number_are_refused(self):
+        self.assert_refused(self.mask((1, "FEMUR_LEFT", None), (1, "FEMUR_RIGHT", None)), "segment number 1")
+
+    def test_a_multi_layer_segmentation_is_refused(self):
+        """Slicer stores overlapping segments as layers; the dataset format has one."""
+        layers = sitk.Compose([sitk.GetImageFromArray(np.ones((6, 6, 6), dtype=np.uint8))] * 2)
+        path = self.upload_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for key, value in segment_header((1, "FEMUR_LEFT", None)).items():
+            layers.SetMetaData(key, str(value))
+        sitk.WriteImage(layers, str(path), useCompression=True)
+        self.assert_refused(path, "layers")
 
     def test_a_segmentation_whose_shape_differs_from_the_image_is_refused(self):
-        upload = self.upload_file(["FEMUR_LEFT"], shape=(5, 5, 5))
-        with self.assertRaises(QCError) as ctx:
-            self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
-        self.assertIn("does not match", ctx.exception.message)
-        self.assert_dataset_untouched()
+        self.assert_refused(self.upload_file(["FEMUR_LEFT"], shape=(5, 5, 5)), "does not match")
 
     def test_a_segmentation_whose_affine_differs_from_the_image_is_refused(self):
-        upload = self.upload_file(["FEMUR_LEFT"], affine=np.diag([2.0, 2.0, 2.0, 1.0]))
-        with self.assertRaises(QCError) as ctx:
-            self.store.submit(self.assignment.assignment_id, self.alice, True, upload)
-        self.assertIn("affine", ctx.exception.message)
-        self.assert_dataset_untouched()
+        self.assert_refused(self.upload_file(["FEMUR_LEFT"], spacing=(2.0, 2.0, 2.0)), "affine")
 
     def test_the_geometry_check_can_be_switched_off(self):
         store = self.make_store(require_geometry_match=False)
         alice = store._users["alice"]
         upload = self.upload_file(["FEMUR_LEFT"], shape=(5, 5, 5))
         store.submit(self.assignment.assignment_id, alice, True, upload)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_LEFT"], 3)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_LEFT"], 2)
 
     def test_an_unknown_confirmed_label_name_is_refused(self):
         upload = self.upload_file(["FEMUR_LEFT"])
@@ -276,6 +412,15 @@ class SubmissionValidationTests(QCTestCase):
             self.store.submit("nope", self.alice, False, None)
         self.assertEqual(ctx.exception.status_code, 404)
 
+    def test_a_dataset_regenerated_under_another_schema_is_not_written(self):
+        """The dataset changed format while the subject was out for review."""
+        self.builder.add_dataset(1, schema_version="0.2.0")
+        with self.assertRaises(QCError) as ctx:
+            self.store.submit(self.assignment.assignment_id, self.alice, True, self.upload_file(["FEMUR_LEFT"]))
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("0.2.0", ctx.exception.message)
+        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.before_bytes)
+
 
 class SubjectWithoutSegmentationTests(QCTestCase):
     """A reviewer creating a segmentation where the dataset had none."""
@@ -290,7 +435,7 @@ class SubjectWithoutSegmentationTests(QCTestCase):
         outcome = store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertTrue(self.builder.segmentation_file(1, 1).exists())
         self.assertIsNone(outcome.backup_path, "there was nothing to back up")
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 3})
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2})
 
 
 class PartialUploadTests(QCTestCase):
@@ -298,9 +443,9 @@ class PartialUploadTests(QCTestCase):
 
     These pin down a sharp edge rather than endorse it. With the default policy a
     confirmed submission is read as the complete truth about the subject: every label
-    missing from the uploaded volume is recorded as a confirmed absence (0) and the
-    stored segmentation is replaced by what was sent. A 3D Slicer client that exports
-    only its visible segments therefore erases the rest. The previous file is kept in
+    missing from the uploaded volume is recorded as not available (0) and the stored
+    segmentation is replaced by what was sent. A 3D Slicer client that exports only its
+    visible segments therefore erases the rest. The previous file is kept in
     ``.bonehub_qc/backups/``, and ``mark_removed_labels_absent=False`` disarms the
     Subject_info half of it.
     """
@@ -308,10 +453,10 @@ class PartialUploadTests(QCTestCase):
     def setUp(self) -> None:
         super().setUp()
         self.builder.add_subject(
-            1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2, "TIBIA_LEFT": 2, "SACRUM": 2}
+            1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1, "TIBIA_LEFT": 1, "SACRUM": 1}
         )
 
-    def test_bones_missing_from_the_upload_are_marked_absent(self):
+    def test_bones_missing_from_the_upload_are_marked_not_available(self):
         store = self.make_store()
         alice = store.create_user("alice")[0]
         assignment = store.next_subject(alice)
@@ -319,7 +464,7 @@ class PartialUploadTests(QCTestCase):
 
         self.assertEqual(
             self.builder.subject_info(1, 1)["segmentation"],
-            {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 0, "TIBIA_LEFT": 0, "SACRUM": 0},
+            {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0, "TIBIA_LEFT": 0, "SACRUM": 0},
         )
         self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_LEFT"})
 
@@ -340,7 +485,7 @@ class PartialUploadTests(QCTestCase):
 
         self.assertEqual(
             self.builder.subject_info(1, 1)["segmentation"],
-            {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 2, "TIBIA_LEFT": 2, "SACRUM": 2},
+            {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 1, "TIBIA_LEFT": 1, "SACRUM": 1},
         )
 
 
@@ -354,7 +499,7 @@ class ExpiredLeaseHandoverTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
         self.bob = self.store.create_user("bob")[0]
@@ -371,7 +516,7 @@ class ExpiredLeaseHandoverTests(QCTestCase):
         self.store.submit(bob_assignment.assignment_id, self.bob, True, self.upload_file(["FEMUR_RIGHT"]))
 
         self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_RIGHT"})
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_RIGHT"], 3)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"]["FEMUR_RIGHT"], 2)
 
         log = self.builder.dataset_log(1).read_text(encoding="utf-8")
         self.assertIn("alice", log)
@@ -383,8 +528,8 @@ class AuditTrailTests(QCTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
-        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
         self.store = self.make_store()
         self.alice = self.store.create_user("alice")[0]
 
@@ -419,7 +564,8 @@ class AuditTrailTests(QCTestCase):
         self.assertEqual(entry["user"], "alice")
         self.assertEqual(entry["subject_key"], "001_000001")
         self.assertTrue(entry["quality_check_confirmed"])
-        self.assertEqual(entry["updated_labels"], {"FEMUR_LEFT": 3, "FEMUR_RIGHT": 3})
+        self.assertEqual(entry["updated_labels"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
+        self.assertTrue(entry["segmentation_path"].endswith("001_000001.seg.nrrd"))
         self.assertIn("timestamp", entry)
 
     def test_assignments_are_recorded_as_well_as_submissions(self):
@@ -442,7 +588,7 @@ class AuditTrailTests(QCTestCase):
         self.assertEqual(len(self.store.audit.read_recent(limit=1)), 1)
 
     def test_each_dataset_gets_its_own_log_next_to_the_data(self):
-        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 2})
+        self.builder.add_subject(2, 1, segmentation={"FEMUR_LEFT": 1})
         store = self.make_store(max_concurrent_assignments_per_user=5)
         alice = store._users["alice"]
         for _ in range(3):
