@@ -5,8 +5,10 @@ once -- or takes it from an invite link, ``/review#key=bhqc_...`` -- keeps it in
 and talks to the same ``/api/v1`` endpoints as the 3D Slicer extension. The images are
 rendered in the reviewer's browser with NiiVue, so the server only sends files.
 
-The page cannot edit a segmentation: a reviewer confirms the stored one as it is
-(``use_stored_segmentation``) or rejects it. Corrections are made in 3D Slicer.
+The page works in the reviewer role: every request it makes says so in ``X-Client-Role``,
+and the server refuses the key of an account that is not a reviewer. It cannot edit a
+segmentation: a reviewer confirms the stored one as it is (``use_stored_segmentation``) or
+rejects it. Corrections are made in 3D Slicer, by an editor.
 
 The page's script and NiiVue itself are served from ``/static``. NiiVue is vendored as one
 pinned file (``static/vendor/``, see ``tools/update_niivue.py``), so the page works on a

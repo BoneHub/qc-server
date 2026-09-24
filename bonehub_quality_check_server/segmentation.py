@@ -54,7 +54,7 @@ _INTEGER_PIXEL_IDS = {
 
 
 class SegmentationError(ValueError):
-    """The upload is not a segmentation the dataset can take. The message is for the reviewer."""
+    """The upload is not a segmentation the dataset can take. The message is for the editor."""
 
 
 @dataclass

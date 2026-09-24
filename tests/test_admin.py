@@ -60,7 +60,7 @@ class AdminUserManagementTests(ApiTestCase):
         key = self.client.post("/admin/api/users", json={"name": "carol"}, headers=self.admin_headers).json()[
             "api_key"
         ]
-        self.assertEqual(self.client.get("/api/v1/ping", headers={"X-API-Key": key}).json()["user"], "carol")
+        self.assertEqual(self.client.get("/api/v1/ping", headers=self.headers(key)).json()["user"], "carol")
 
     def test_a_duplicate_name_is_a_409(self):
         response = self.client.post("/admin/api/users", json={"name": "alice"}, headers=self.admin_headers)
@@ -110,7 +110,7 @@ class AdminUserManagementTests(ApiTestCase):
 
     def test_rotating_a_key_locks_out_the_old_one(self):
         new_key = self.client.post("/admin/api/users/alice/rotate-key", headers=self.admin_headers).json()["api_key"]
-        self.assertEqual(self.client.get("/api/v1/ping", headers={"X-API-Key": new_key}).status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/ping", headers=self.headers(new_key)).status_code, 200)
         self.assertEqual(self.client.get("/api/v1/ping", headers=self.headers(self.alice_key)).status_code, 401)
 
     def test_a_user_can_be_disabled_and_enabled_again(self):

@@ -1,19 +1,23 @@
 """Client-facing REST API, used by the 3D Slicer extension and the browser review page.
 
-Every endpoint authenticates with an ``X-API-Key`` header holding a reviewer key issued
-from the admin panel. The flow a client follows is:
+Every endpoint authenticates with an ``X-API-Key`` header holding a user's key issued from
+the admin panel, and an ``X-Client-Role`` header naming the role the client works in:
+``editor`` from 3D Slicer, ``reviewer`` from the review page. The account must hold that
+role, or every request is refused: a reviewer connecting from 3D Slicer is pointed to the
+review page, and an editor cannot sign in to the review page. The flow a client follows is:
 
-1. ``GET  /api/v1/ping``                          - check the key and the server
+1. ``GET  /api/v1/ping``                          - check the key, its role and the server
 2. ``POST /api/v1/subjects/next``                 - lease the next subject
 3. ``GET  /api/v1/assignments/{id}/image``        - download the image
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - download the segmentation, if any
 5. ``POST /api/v1/assignments/{id}/submit``       - send the verdict back
 
-Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. A client that only
-looks, like the review page, confirms with ``use_stored_segmentation`` instead of uploading.
+Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. An editor confirms
+by uploading the corrected segmentation; a reviewer, who only looks, confirms with
+``use_stored_segmentation`` instead.
 
-What a reviewer is sent of a subject follows their account's ``data_access``: a file left
-out is missing from the handout and refused at its download endpoint.
+What a user is sent of a subject follows their account's ``data_access``: a file left out
+is missing from the handout and refused at its download endpoint.
 """
 
 from __future__ import annotations
@@ -29,6 +33,8 @@ from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __versi
 from .config import STATUS_REVIEWED
 from .models import (
     DATA_ACCESS_DESCRIPTIONS,
+    EDITOR,
+    ROLES,
     Assignment,
     HandoutSegment,
     SubjectHandout,
@@ -42,6 +48,9 @@ router = APIRouter(prefix="/api/v1", tags=["client"])
 
 UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
+#: The header in which a client names the role it works in.
+ROLE_HEADER = "X-Client-Role"
+
 
 def get_store(request: Request) -> QCStore:
     store: QCStore | None = getattr(request.app.state, "store", None)
@@ -50,19 +59,36 @@ def get_store(request: Request) -> QCStore:
     return store
 
 
-def get_user(request: Request, x_api_key: str | None = Header(None, alias="X-API-Key")) -> User:
-    return get_store(request).authenticate(x_api_key)
+def client_role(x_client_role: str | None = Header(None, alias=ROLE_HEADER)) -> str | None:
+    """The role the calling client says it works in, as sent. :func:`get_user` checks it."""
+    return x_client_role
+
+
+def get_user(
+    request: Request,
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    role: str | None = Depends(client_role),
+) -> User:
+    """The user behind the key, who must hold the role of the client the request comes from.
+
+    The key is checked first, so a request without one is told that before anything else.
+    """
+    user = get_store(request).authenticate(x_api_key)
+    _require_role(user, role, review_page=f"{request.base_url}review")
+    return user
 
 
 @router.get("/ping")
-def ping(request: Request, user: User = Depends(get_user)) -> dict:
-    """Confirm the key works and report what this reviewer is allowed to see."""
+def ping(request: Request, user: User = Depends(get_user), role: str = Depends(client_role)) -> dict:
+    """Confirm the key works in this client's role, and report what this user is allowed to see."""
     store = get_store(request)
     return {
         "status": "ok",
         "server": "bonehub-dataset-quality-check-server",
         "schema_version": SCHEMA_VERSION,
         "user": user.name,
+        "role": role,
+        "roles": user.roles,
         "allowed_dataset_ids": user.allowed_dataset_ids,
         "data_access": user.data_access,
         "confirmed_label_status": STATUS_REVIEWED,
@@ -85,15 +111,18 @@ def labels(user: User = Depends(get_user)) -> dict:
 
 
 @router.post("/subjects/next", response_model=SubjectHandout)
-def next_subject(request: Request, user: User = Depends(get_user)) -> SubjectHandout:
-    """Lease the next subject for this reviewer.
+def next_subject(
+    request: Request, user: User = Depends(get_user), role: str = Depends(client_role)
+) -> SubjectHandout:
+    """Lease the next subject for this user, in the role of their client.
 
-    If the reviewer already holds their maximum number of subjects, the oldest open one is
+    If the user already holds their maximum number of subjects, the oldest open one is
     returned again instead of an error, so a client that lost its local copy can simply
-    ask for the next subject again.
+    ask for the next subject again. A reviewer is not handed a subject without a
+    segmentation, which only an editor can create.
     """
     store = get_store(request)
-    return _handout(store, store.next_subject(user), user)
+    return _handout(store, store.next_subject(user, role), user)
 
 
 @router.get("/assignments", response_model=list[Assignment])
@@ -132,7 +161,7 @@ def download_segmentation(assignment_id: str, request: Request, user: User = Dep
 
 @router.post("/assignments/{assignment_id}/extend", response_model=Assignment)
 def extend_assignment(assignment_id: str, request: Request, user: User = Depends(get_user)) -> Assignment:
-    """Keep the lease alive while a reviewer is still working on the subject."""
+    """Keep the lease alive while the user is still working on the subject."""
     return get_store(request).extend_assignment(assignment_id, user)
 
 
@@ -152,13 +181,13 @@ async def submit(
     ),
     user: User = Depends(get_user),
 ) -> SubmissionResult:
-    """Receive a reviewer's verdict.
+    """Receive a user's verdict.
 
     ``quality_check_confirmed=true`` stores the uploaded segmentation and sets the reviewed
-    labels in ``Subject_info_XXX.json`` to status 2, "available, reviewed and corrected".
-    With ``use_stored_segmentation`` and no file, the stored segmentation is confirmed as it
-    is and left untouched. ``false`` leaves the dataset untouched and only writes the audit
-    trail.
+    labels in ``Subject_info_XXX.json`` to status 2, "available, reviewed and corrected";
+    uploading takes an editor. With ``use_stored_segmentation`` and no file, the stored
+    segmentation is confirmed as it is and left untouched, which takes a reviewer.
+    ``false`` leaves the dataset untouched and only writes the audit trail.
     """
     store = get_store(request)
 
@@ -201,11 +230,39 @@ async def submit(
 
 
 # --------------------------------------------------------------------- helpers
+def _require_role(user: User, role: str | None, review_page: str) -> None:
+    """Refuse a client whose role the account does not hold, and say where the user can work."""
+    if not role:
+        raise QCError(
+            f"The client did not say which role it works in: send the '{ROLE_HEADER}' header, 'editor' from "
+            "3D Slicer or 'reviewer' from the review page. A client that does not is out of date; update it.",
+            status_code=400,
+        )
+    if role not in ROLES:
+        raise QCError(
+            f"'{role}' in the '{ROLE_HEADER}' header is not a role. Send 'editor' or 'reviewer'.", status_code=400
+        )
+    if role in user.roles:
+        return
+    # Every account holds at least one role, so one without this role holds the other.
+    if role == EDITOR:
+        raise QCError(
+            f"'{user.name}' is a reviewer, not an editor, so cannot work in 3D Slicer, where segmentations are "
+            f"corrected. Review subjects in the browser instead, on the review page: {review_page}",
+            status_code=403,
+        )
+    raise QCError(
+        f"'{user.name}' is an editor, not a reviewer, so cannot sign in to the review page. Work on subjects "
+        "in 3D Slicer instead, with the BoneHub Quality Check extension.",
+        status_code=403,
+    )
+
+
 def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHandout:
     dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
     subject = store.subject_info(dataset_id, subject_id)
     segmentation_labels = dict(subject.segmentation or {})
-    # Only what this reviewer is sent is offered; the download endpoints refuse the rest.
+    # Only what this user is sent is offered; the download endpoints refuse the rest.
     has_image = user.receives_image and store.image_path(dataset_id, subject_id).exists()
     has_segmentation = user.receives_segmentation and store.segmentation_path(dataset_id, subject_id).exists()
     segments = store.segment_table(dataset_id, subject_id) if has_segmentation else []

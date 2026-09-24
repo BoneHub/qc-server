@@ -1,4 +1,4 @@
-"""Admin panel: create reviewers, hand out API keys and watch the queue.
+"""Admin panel: create users -- reviewers, editors or both -- hand out API keys and watch the queue.
 
 Authentication is the server's admin key, sent as an ``X-Admin-Key`` header. The panel at
 ``/admin`` is a single static page that asks for the key once and keeps it in the
@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import FileResponse
 
-from .models import DEFAULT_DATA_ACCESS, User
+from .models import DEFAULT_DATA_ACCESS, DEFAULT_ROLES, User
 from .store import UNSET, QCError, QCStore
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -61,30 +61,38 @@ def list_users(store: QCStore = Depends(require_admin)) -> list[dict]:
 
 @router.post("/api/users")
 def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
-    """Create a reviewer. The plaintext API key is in the response and nowhere else."""
+    """Create a user. The plaintext API key is in the response and nowhere else.
+
+    ``roles`` defaults to both, reviewer and editor.
+    """
     name = str(payload.get("name", "")).strip()
     allowed = _parse_dataset_ids(payload.get("allowed_dataset_ids"))
     note = str(payload.get("note", "") or "")
     data_access = str(payload.get("data_access") or DEFAULT_DATA_ACCESS)
-    user, api_key = store.create_user(name=name, allowed_dataset_ids=allowed, note=note, data_access=data_access)
+    roles = DEFAULT_ROLES if payload.get("roles") is None else _parse_roles(payload["roles"])
+    user, api_key = store.create_user(
+        name=name, allowed_dataset_ids=allowed, note=note, data_access=data_access, roles=roles
+    )
     return {
         "user": user.public_dict(),
         "api_key": api_key,
-        "warning": "This key is shown only once. Copy it now and give it to the reviewer.",
+        "warning": "This key is shown only once. Copy it now and give it to the user.",
     }
 
 
 @router.patch("/api/users/{name}")
 def update_user(name: str, payload: dict, store: QCStore = Depends(require_admin)) -> dict:
-    """Change a reviewer. A field absent from the body is left exactly as it was."""
+    """Change a user. A field absent from the body is left exactly as it was."""
     allowed = _parse_dataset_ids(payload["allowed_dataset_ids"]) if "allowed_dataset_ids" in payload else UNSET
     note = payload.get("note")
     data_access = payload.get("data_access")
+    roles = payload.get("roles")
     user = store.update_user(
         name,
         allowed,
         None if note is None else str(note),
         data_access=None if data_access is None else str(data_access),
+        roles=None if roles is None else _parse_roles(roles),
     )
     return user.public_dict()
 
@@ -124,7 +132,7 @@ def assignments(limit: int = 200, state: str | None = None, store: QCStore = Dep
 
 @router.post("/api/assignments/{assignment_id}/release")
 def release(assignment_id: str, store: QCStore = Depends(require_admin)) -> dict:
-    """Take a subject back from a reviewer who is not going to finish it."""
+    """Take a subject back from a user who is not going to finish it."""
     return store.release_assignment(assignment_id).model_dump()
 
 
@@ -179,3 +187,12 @@ def _parse_dataset_ids(raw) -> list[int] | None:
         return sorted({int(item) for item in items})
     except (TypeError, ValueError) as exc:
         raise QCError(f"allowed_dataset_ids must contain integers: {exc}") from exc
+
+
+def _parse_roles(raw) -> list[str]:
+    """Accept a list, or a comma-separated string; the store checks the roles themselves."""
+    if isinstance(raw, str):
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(item).strip() for item in raw]
+    raise QCError("roles must be a list of roles or a comma-separated string: reviewer, editor, or both.")

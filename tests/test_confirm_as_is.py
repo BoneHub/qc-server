@@ -12,6 +12,7 @@ import json
 import unittest
 
 from bonehub_data_schema import write_segmentation
+from bonehub_quality_check_server.models import REVIEWER
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase, reference_image, segmentation_array, write_mask
@@ -223,16 +224,18 @@ class DataAccessVerdictTests(QCTestCase):
 
 
 class ConfirmOverHttpTests(ApiTestCase):
+    """As the review page does it: in the reviewer role."""
+
     def submit_stored(self, key: str, assignment_id: str, **metadata):
         body = {"quality_check_confirmed": True, "use_stored_segmentation": True, **metadata}
         return self.client.post(
             f"/api/v1/assignments/{assignment_id}/submit",
             files={"metadata": (None, json.dumps(body))},
-            headers=self.headers(key),
+            headers=self.headers(key, REVIEWER),
         )
 
     def test_the_review_page_confirms_without_a_file(self):
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_subject(self.alice_key, REVIEWER)
         self.assertIsNone(handout["stored_segmentation_issue"])
         response = self.submit_stored(self.alice_key, handout["assignment_id"], confirmed_labels=["FEMUR_LEFT"])
         self.assertEqual(response.status_code, 200, response.text)
@@ -242,7 +245,7 @@ class ConfirmOverHttpTests(ApiTestCase):
 
     def test_the_handout_warns_about_a_segmentation_off_its_grid(self):
         write_shifted_mask(self.builder.segmentation_file(1, 1), ["FEMUR_LEFT", "FEMUR_RIGHT"], 0.4)
-        handout = self.next_subject(self.alice_key)
+        handout = self.next_subject(self.alice_key, REVIEWER)
         self.assertIn("0.4 mm", handout["stored_segmentation_issue"])
         response = self.submit_stored(self.alice_key, handout["assignment_id"])
         self.assertEqual(response.status_code, 409)

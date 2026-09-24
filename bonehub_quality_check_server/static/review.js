@@ -3,7 +3,10 @@
 // Signs in with a reviewer's API key, leases subjects from /api/v1 the way the 3D Slicer
 // extension does, shows them with NiiVue, and sends the verdict back. It cannot edit a
 // segmentation: a confirmation vouches for the stored one as it is
-// (use_stored_segmentation), and corrections are made in 3D Slicer.
+// (use_stored_segmentation), and corrections are made in 3D Slicer, by an editor.
+//
+// Every request says that it comes from a reviewer, so the server refuses the key of an
+// account that is not one.
 //
 // Two NiiVue canvases. The 3D view renders the label volume alone; the slice view shows the
 // image with the labels over it. One canvas cannot do both: NiiVue's 3D rendering draws the
@@ -13,6 +16,10 @@ import { Niivue, NVImage, SHOW_RENDER, SLICE_TYPE } from "./vendor/niivue-0.69.0
 
 const KEY_STORAGE = "bonehub_qc_review_key";
 const PREFS_STORAGE = "bonehub_qc_review_prefs";
+
+// The role this page works in, and the header that names it.
+const ROLE_HEADER = "X-Client-Role";
+const ROLE = "reviewer";
 
 // Short names for the Subject_info label statuses; the server's full wording is the tooltip.
 const STATUS_SHORT = { 0: "absent", 1: "unreviewed", 2: "reviewed" };
@@ -122,7 +129,7 @@ function errorDetail(data, status) {
 }
 
 async function api(method, path, { json, form } = {}) {
-  const headers = { "X-API-Key": state.key, Accept: "application/json" };
+  const headers = { "X-API-Key": state.key, [ROLE_HEADER]: ROLE, Accept: "application/json" };
   let body;
   if (json !== undefined) {
     headers["Content-Type"] = "application/json";
@@ -149,7 +156,7 @@ async function api(method, path, { json, form } = {}) {
 async function download(url, what, onProgress) {
   let response;
   try {
-    response = await fetch(url, { headers: { "X-API-Key": state.key } });
+    response = await fetch(url, { headers: { "X-API-Key": state.key, [ROLE_HEADER]: ROLE } });
   } catch (e) {
     throw new ApiError(`The ${what} could not be downloaded: the server cannot be reached.`, 0);
   }
@@ -889,19 +896,29 @@ function renderSubject() {
   } else if (handout.data_access === "segmentation") {
     notes.push("Your account is sent the segmentation only; the slices show the labels without the image.");
   }
+  // Corrections take 3D Slicer and the editor role, which this account may or may not hold.
   if (handout.data_access !== "image" && !handout.has_segmentation) {
     notes.push(
-      "This subject has no segmentation yet. Creating one needs 3D Slicer: release it, or reject it with a comment.",
+      isEditor()
+        ? "This subject has no segmentation yet. Create one in 3D Slicer, or release the subject."
+        : "This subject has no segmentation yet, and creating one is for an editor, in 3D Slicer. Release it.",
     );
   } else if (handout.has_segmentation && !state.segments.length) {
     notes.push("The server could not read which labels this segmentation holds, so it cannot be reviewed here.");
   } else if (handout.stored_segmentation_issue) {
     notes.push(
       `This segmentation cannot be confirmed as it is. ${handout.stored_segmentation_issue} ` +
-        "Correct it in 3D Slicer, or reject it with a comment.",
+        (isEditor()
+          ? "Correct it in 3D Slicer, or reject it with a comment."
+          : "It needs correcting in 3D Slicer, by an editor: reject it with a comment."),
     );
   }
   $("subjectNotes").replaceChildren(...notes.map((text) => banner(text, "note")));
+}
+
+// Whether this account may also correct segmentations, which is done in 3D Slicer.
+function isEditor() {
+  return !!(state.info && (state.info.roles || []).includes("editor"));
 }
 
 function renderLease() {

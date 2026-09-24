@@ -13,6 +13,9 @@ Python is fragile. Keep it dependency-free.
 
 Segmentations go both ways in BoneHub's segmentation format (``.seg.nrrd``); the server
 refuses an upload in any other format.
+
+A client works in one role, which it names in every request: ``editor``, the role of 3D
+Slicer, by default. The server refuses the key of an account that does not hold the role.
 """
 
 from __future__ import annotations
@@ -29,6 +32,14 @@ from pathlib import Path
 
 DEFAULT_TIMEOUT = 300
 
+#: The header in which a client names the role it works in.
+ROLE_HEADER = "X-Client-Role"
+
+#: The roles a client can work in: an editor corrects segmentations and uploads them, as
+#: 3D Slicer does; a reviewer confirms or rejects them as they are, as the review page does.
+EDITOR = "editor"
+REVIEWER = "reviewer"
+
 
 class QCClientError(RuntimeError):
     """An error reported by the server, or a transport failure."""
@@ -39,16 +50,17 @@ class QCClientError(RuntimeError):
 
 
 class BoneHubQCClient:
-    """Thin wrapper over the server's REST API."""
+    """Thin wrapper over the server's REST API, working in one role."""
 
-    def __init__(self, base_url: str, api_key: str, timeout: int = DEFAULT_TIMEOUT):
+    def __init__(self, base_url: str, api_key: str, timeout: int = DEFAULT_TIMEOUT, role: str = EDITOR):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.role = role
 
     # --- endpoints ----------------------------------------------------------
     def ping(self) -> dict:
-        """Check the server and the API key. Raises ``QCClientError`` if either is wrong."""
+        """Check the server, the API key and its role. Raises ``QCClientError`` if any is wrong."""
         return self._request("GET", "/api/v1/ping")
 
     def labels(self) -> dict:
@@ -124,6 +136,7 @@ class BoneHubQCClient:
     ):
         request = urllib.request.Request(self.base_url + path, data=body, method=method)
         request.add_header("X-API-Key", self.api_key)
+        request.add_header(ROLE_HEADER, self.role)
         request.add_header("Accept", "application/json")
         if content_type:
             request.add_header("Content-Type", content_type)
@@ -146,6 +159,7 @@ class BoneHubQCClient:
 
         request = urllib.request.Request(self.base_url + path, method="GET")
         request.add_header("X-API-Key", self.api_key)
+        request.add_header(ROLE_HEADER, self.role)
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response, open(tmp_path, "wb") as f:
                 shutil.copyfileobj(response, f, length=1024 * 1024)

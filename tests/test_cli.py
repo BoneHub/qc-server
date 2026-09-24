@@ -50,7 +50,7 @@ class CommandLineTests(QCTestCase):
         self.assertIn("bob", output)
 
     def test_list_users_says_so_when_there_are_none(self):
-        self.assertIn("No reviewers yet", self.cli("list-users"))
+        self.assertIn("No users yet", self.cli("list-users"))
 
     def test_rotate_key_issues_a_working_replacement(self):
         old = self.cli("add-user", "--name", "alice").split("API key (shown once):")[1].strip()

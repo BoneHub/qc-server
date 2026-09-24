@@ -23,10 +23,10 @@ services:
       # the logs and the server's non-secret state are written back into the dataset,
       # the state in .bonehub_qc/<server id>/.
       - "bonehub-dataset:/data"
-      # The server's credentials -- its id, private key, admin key and reviewer accounts --
+      # The server's credentials -- its id, private key, admin key and user accounts --
       # stay here, on the Docker host, never on the share. This volume IS the server:
       # removing it (docker compose down -v) creates a new server on the next start, with a
-      # new admin key, no reviewers, and a new state folder on the share.
+      # new admin key, no users, and a new state folder on the share.
       - "bonehub-qc-credentials:/var/lib/bonehub-qc"
     environment:
       BONEHUB_QC_DATASET_ROOT: /data
@@ -62,7 +62,7 @@ volumes:
 
   # A plain local volume on the Docker host. Unlike the dataset volume above, it holds data:
   # the server's credentials. Keep it as long as the server should keep its admin key and
-  # reviewers.
+  # users.
   bonehub-qc-credentials:
     name: bonehub_qc_credentials
 

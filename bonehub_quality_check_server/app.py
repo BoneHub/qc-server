@@ -13,6 +13,7 @@ from bonehub_data_schema import __version__ as SCHEMA_VERSION
 
 from . import __version__, admin, api, auth, review
 from .config import QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_state_root
+from .models import EDITOR, REVIEWER
 from .store import QCError, QCStore
 
 #: How an administrator reaches the CLI of the running container.
@@ -37,8 +38,9 @@ def create_app(
         title="BoneHub Dataset Quality Check",
         version=__version__,
         description=(
-            "Distributes BoneHub subjects to reviewers -- in 3D Slicer or on the browser review "
-            "page -- and writes confirmed segmentations back into the dataset folder."
+            "Distributes BoneHub subjects to editors, who correct them in 3D Slicer, and to reviewers, "
+            "who check them on the browser review page, and writes confirmed segmentations back into "
+            "the dataset folder."
         ),
     )
     app.state.store = QCStore(
@@ -84,6 +86,7 @@ def _announce(store: QCStore) -> None:
     key out.
     """
     stats = store.stats()
+    users = store.list_users()
     details = [
         f"server id    : {store.server_id}" + (" (new server)" if store.server_created else ""),
         f"dataset root : {store.dataset_root}",
@@ -91,7 +94,8 @@ def _announce(store: QCStore) -> None:
         f"credentials  : {store.credentials_dir} (inside the container)",
         f"eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
         f"(label statuses {store.config.eligible_label_values})",
-        f"reviewers    : {len(store.list_users())}",
+        f"users        : {len(users)} (reviewers {sum(REVIEWER in u['roles'] for u in users)}, "
+        f"editors {sum(EDITOR in u['roles'] for u in users)})",
         f"data schema  : {SCHEMA_VERSION}",
     ]
     lines = [

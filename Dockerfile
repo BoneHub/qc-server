@@ -13,7 +13,7 @@
 #   /data                 the dataset, read-write. The server keeps its non-secret state
 #                         in /data/.bonehub_qc/<server id>/.
 #   /var/lib/bonehub-qc   the server's credentials: its id, private key, admin key and
-#                         reviewer accounts. A volume on the Docker host, never the share.
+#                         user accounts. A volume on the Docker host, never the share.
 
 FROM python:3.11-slim
 

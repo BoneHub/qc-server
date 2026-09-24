@@ -1,4 +1,4 @@
-"""The quality-check store: subject index, reviewers, assignments and dataset writes.
+"""The quality-check store: subject index, users, assignments and dataset writes.
 
 The server keeps its credentials apart from everything else. The credentials folder is
 inside the container, never on the dataset share::
@@ -7,7 +7,7 @@ inside the container, never on the dataset share::
     |-- server_id             this server's name; a new credentials folder is a new server
     |-- server_private_key    generated on first start, unless BONEHUB_QC_PRIVATE_KEY is set
     |-- admin_key             generated on first start, unless BONEHUB_QC_ADMIN_KEY is set
-    `-- users.json            reviewers and their API key digests
+    `-- users.json            users, their roles and their API key digests
 
 Everything else is on the share, in a folder of this server's own, so that several
 servers -- each with its own admin -- can work on one dataset without overwriting each
@@ -69,7 +69,17 @@ from .config import (
     STATUS_REVIEWED,
     QCServerConfig,
 )
-from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS, TERMINAL_STATES, Assignment, QueueStats, User
+from .models import (
+    DATA_ACCESS_DESCRIPTIONS,
+    DEFAULT_DATA_ACCESS,
+    DEFAULT_ROLES,
+    REVIEWER,
+    ROLES,
+    TERMINAL_STATES,
+    Assignment,
+    QueueStats,
+    User,
+)
 from .segmentation import (
     SegmentationError,
     SegmentDescription,
@@ -353,7 +363,7 @@ class QCStore:
     # ------------------------------------------------------------------ users
     @property
     def users_path(self) -> Path:
-        """Reviewer accounts hold key digests, so they stay with the credentials, off the share."""
+        """User accounts hold key digests, so they stay with the credentials, off the share."""
         return self.credentials_dir / USERS_FILE_NAME
 
     def _load_users(self) -> dict[str, User]:
@@ -371,7 +381,7 @@ class QCStore:
         return stat.st_mtime_ns, stat.st_size
 
     def _refresh_users(self) -> None:
-        """Pick up reviewer accounts another process changed. Caller holds the lock.
+        """Pick up user accounts another process changed. Caller holds the lock.
 
         The CLI runs inside the container next to the live server (``docker compose exec``),
         so an account it adds must reach the server, and must not be lost on its next save.
@@ -400,15 +410,18 @@ class QCStore:
         allowed_dataset_ids: list[int] | None = None,
         note: str = "",
         data_access: str = DEFAULT_DATA_ACCESS,
+        roles: Iterable[str] = DEFAULT_ROLES,
     ) -> tuple[User, str]:
-        """Create a reviewer and return the user together with its plaintext API key.
+        """Create a user and return it together with its plaintext API key.
 
+        ``roles`` is what the user may do: ``reviewer``, ``editor``, or both, the default.
         The plaintext key is returned exactly once; only its digest is stored.
         """
         name = name.strip()
         if not name:
             raise QCError("A user name is required.")
         _check_data_access(data_access)
+        roles = _check_roles(roles)
         with self._lock:
             self._refresh_users()
             if name in self._users:
@@ -420,6 +433,7 @@ class QCStore:
                 key_hash=auth.hash_api_key(api_key, self.private_key),
                 created_at=utc_now_iso(),
                 active=True,
+                roles=roles,
                 allowed_dataset_ids=allowed_dataset_ids,
                 data_access=data_access,
                 note=note,
@@ -428,13 +442,13 @@ class QCStore:
             self._save_users()
         self.audit.record(
             "user_created",
-            {"user": name, "key_prefix": user.key_prefix, "data_access": user.data_access},
-            summary=f"Created user '{name}' (receives {DATA_ACCESS_DESCRIPTIONS[user.data_access]}).",
+            {"user": name, "key_prefix": user.key_prefix, "roles": user.roles, "data_access": user.data_access},
+            summary=f"Created user '{name}' ({_account(user)}).",
         )
         return user, api_key
 
     def rotate_user_key(self, name: str) -> str:
-        """Issue a new API key for a reviewer and invalidate the old one."""
+        """Issue a new API key for a user and invalidate the old one."""
         with self._lock:
             user = self._require_user(name)
             api_key = auth.generate_api_key()
@@ -457,16 +471,24 @@ class QCStore:
         return user
 
     def update_user(
-        self, name: str, allowed_dataset_ids=UNSET, note: str | None = None, data_access: str | None = None
+        self,
+        name: str,
+        allowed_dataset_ids=UNSET,
+        note: str | None = None,
+        data_access: str | None = None,
+        roles: Iterable[str] | None = None,
     ) -> User:
-        """Change a reviewer. An argument left out is not touched.
+        """Change a user. An argument left out is not touched.
 
         ``allowed_dataset_ids`` takes ``None`` to mean "every dataset the server serves",
         so it needs :data:`UNSET` to tell that apart from "leave the restriction alone" --
-        otherwise editing only the note would quietly widen a reviewer's access.
+        otherwise editing only the note would quietly widen a user's access. A change of
+        ``roles`` applies from the user's next request, in whichever client.
         """
         if data_access is not None:
             _check_data_access(data_access)
+        if roles is not None:
+            roles = _check_roles(roles)
         with self._lock:
             user = self._require_user(name)
             if allowed_dataset_ids is not UNSET:
@@ -475,16 +497,18 @@ class QCStore:
                 user.note = note
             if data_access is not None:
                 user.data_access = data_access
+            if roles is not None:
+                user.roles = roles
             self._save_users()
         self.audit.record(
             "user_updated",
-            {"user": name, "data_access": user.data_access},
-            summary=f"Updated user '{name}' (receives {DATA_ACCESS_DESCRIPTIONS[user.data_access]}).",
+            {"user": name, "roles": user.roles, "data_access": user.data_access},
+            summary=f"Updated user '{name}' ({_account(user)}).",
         )
         return user
 
     def delete_user(self, name: str) -> None:
-        """Remove a reviewer and release whatever they were still holding."""
+        """Remove a user and release whatever they were still holding."""
         with self._lock:
             self._require_user(name)
             del self._users[name]
@@ -582,7 +606,7 @@ class QCStore:
                 return False
             if assignment.state == "rejected":
                 # A rejected subject stays out of the queue unless the policy says otherwise,
-                # and never goes back to the reviewer who rejected it.
+                # and never goes back to the user who rejected it.
                 if not self.config.requeue_rejected or assignment.user == user.name:
                     return False
         return True
@@ -592,8 +616,12 @@ class QCStore:
             self._expire_stale_assignments()
             return [a for a in self._assignments.values() if a.user == user_name and a.state == "assigned"]
 
-    def next_subject(self, user: User) -> Assignment:
-        """Pick a free subject for this reviewer and lease it to them."""
+    def next_subject(self, user: User, role: str | None = None) -> Assignment:
+        """Pick a free subject for this user and lease it to them.
+
+        ``role`` is the role of the client asking. A reviewer can only confirm or reject the
+        segmentation a subject has, so a subject without one is left to the editors.
+        """
         self._ensure_fresh_index()
         with self._lock:
             self._expire_stale_assignments()
@@ -604,11 +632,13 @@ class QCStore:
                 # that lost its local copy can pick the same work back up.
                 return sorted(open_assignments, key=lambda a: a.assigned_at)[0]
 
-            # A reviewer sent the segmentation only has nothing to look at in a subject without one.
+            # Nobody is handed a subject they could do nothing with: a user sent the segmentation
+            # only has nothing to look at in a subject without one, and a reviewer nothing to confirm.
+            needs_segmentation = not user.receives_image or role == REVIEWER
             candidates = [
                 ref
                 for ref in self._index
-                if self._user_may_access(user, ref.dataset_id) and (user.receives_image or ref.has_segmentation)
+                if self._user_may_access(user, ref.dataset_id) and (ref.has_segmentation or not needs_segmentation)
             ]
             if self.config.assignment_strategy == "random":
                 random.shuffle(candidates)
@@ -630,11 +660,13 @@ class QCStore:
                 )
                 self._assignments[assignment.assignment_id] = assignment
                 self._save_assignments()
+                as_role = f" as {role}" if role else ""
                 self.audit.record(
                     "assigned",
                     {
                         "assignment_id": assignment.assignment_id,
                         "user": user.name,
+                        "role": role,
                         "dataset_id": ref.dataset_id,
                         "subject_id": ref.subject_id,
                         "subject_key": ref.subject_key,
@@ -642,7 +674,7 @@ class QCStore:
                     },
                     dataset_id=ref.dataset_id,
                     summary=(
-                        f"Assigned subject {ref.subject_key} to '{user.name}' "
+                        f"Assigned subject {ref.subject_key} to '{user.name}'{as_role} "
                         f"(assignment {assignment.assignment_id})."
                     ),
                 )
@@ -656,11 +688,11 @@ class QCStore:
         if assignment is None:
             raise QCError(f"Assignment '{assignment_id}' does not exist.", status_code=404)
         if user is not None and assignment.user != user.name:
-            raise QCError("This assignment belongs to another reviewer.", status_code=403)
+            raise QCError("This assignment belongs to another user.", status_code=403)
         return assignment
 
     def release_assignment(self, assignment_id: str, user: User | None = None) -> Assignment:
-        """Give a subject back without judging it, so somebody else can review it."""
+        """Give a subject back without judging it, so somebody else can take it."""
         with self._lock:
             assignment = self.get_assignment(assignment_id, user)
             if assignment.state != "assigned":
@@ -682,7 +714,7 @@ class QCStore:
         return assignment
 
     def extend_assignment(self, assignment_id: str, user: User) -> Assignment:
-        """Push the lease out by another TTL while a reviewer is still working."""
+        """Push the lease out by another TTL while a user is still working."""
         with self._lock:
             assignment = self.get_assignment(assignment_id, user)
             if assignment.state != "assigned":
@@ -790,8 +822,8 @@ class QCStore:
     def stored_segmentation_issue(self, dataset_id: int, subject_id: int) -> str | None:
         """Why the stored segmentation cannot be confirmed as it is, or None when it can.
 
-        Checked from the file headers, so a client can be told before a reviewer spends time
-        on a subject whose confirmation the server would refuse.
+        Checked from the file headers, so a client can be told before anyone spends time on a
+        subject whose confirmation the server would refuse.
         """
         path = self.segmentation_path(dataset_id, subject_id)
         image_file = self.image_path(dataset_id, subject_id)
@@ -825,16 +857,17 @@ class QCStore:
         comment: str | None = None,
         use_stored_segmentation: bool = False,
     ) -> "SubmissionOutcome":
-        """Apply a reviewer's verdict.
+        """Apply a user's verdict.
 
         ``quality_check_confirmed=False`` changes nothing in the dataset: the segmentation
         file and Subject_info are left exactly as they are, and only the audit trail and
         the assignment state record that the subject was looked at and rejected.
 
-        A confirmation either brings the reviewed segmentation (``segmentation_tmp_path``) or,
-        with ``use_stored_segmentation``, vouches for the stored one as it is, which is then
-        left untouched. Either way it takes a reviewer who was sent the segmentation, when the
-        subject has one: nobody confirms or replaces a segmentation they have not seen.
+        A confirmation either brings the corrected segmentation (``segmentation_tmp_path``),
+        which takes an editor, or, with ``use_stored_segmentation``, vouches for the stored one
+        as it is, which takes a reviewer and leaves the file untouched. Either way it takes a
+        user who was sent the segmentation, when the subject has one: nobody confirms or
+        replaces a segmentation they have not seen.
         """
         assignment = self.get_assignment(assignment_id, user)
         if assignment.state not in {"assigned", "expired"}:
@@ -846,9 +879,23 @@ class QCStore:
             return self._finish_rejected(assignment, comment, user)
 
         stored_path = self.segmentation_path(dataset_id, subject_id)
+        if use_stored_segmentation and segmentation_tmp_path is not None:
+            raise QCError("Send a segmentation file or set use_stored_segmentation, not both.")
+        # The account's roles decide how it may confirm, whichever client the request comes from.
+        if segmentation_tmp_path is not None and not user.is_editor:
+            raise QCError(
+                f"'{user.name}' is not an editor, so cannot upload a segmentation: segmentations are corrected "
+                "in 3D Slicer, by an editor. Confirm the stored segmentation as it is, or reject the subject "
+                "with a comment.",
+                status_code=403,
+            )
+        if use_stored_segmentation and not user.is_reviewer:
+            raise QCError(
+                f"'{user.name}' is not a reviewer, so cannot confirm the stored segmentation as it is. Confirm "
+                "the subject from 3D Slicer, which uploads its segmentation.",
+                status_code=403,
+            )
         if use_stored_segmentation:
-            if segmentation_tmp_path is not None:
-                raise QCError("Send a segmentation file or set use_stored_segmentation, not both.")
             if not stored_path.exists():
                 raise QCError(
                     f"Subject {assignment.subject_key} has no segmentation to confirm as it is.", status_code=409
@@ -874,8 +921,8 @@ class QCStore:
             except QCError as exc:
                 raise QCError(
                     f"The stored segmentation of {assignment.subject_key} cannot be confirmed as it is. "
-                    f"{exc.message} Correct it in 3D Slicer, which writes it back on the image's voxel grid, "
-                    "or reject the subject with a comment.",
+                    f"{exc.message} An editor can correct it in 3D Slicer, which writes it back on the image's "
+                    "voxel grid; otherwise reject the subject with a comment.",
                     status_code=409,
                 ) from exc
         else:
@@ -974,7 +1021,7 @@ class QCStore:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(staged_path), str(target_path))
 
-            # A label the reviewer deleted from a confirmed segmentation is no longer available.
+            # A label the editor deleted from a confirmed segmentation is no longer available.
             removed_labels = [
                 label
                 for label, status in previous.items()
@@ -1128,11 +1175,27 @@ def _check_data_access(data_access: str) -> None:
         )
 
 
+def _check_roles(roles: Iterable[str]) -> list[str]:
+    """The roles each once, in the order of ``ROLES``, or a QCError that says what is wrong."""
+    roles = [str(role) for role in roles]
+    unknown = [role for role in roles if role not in ROLES]
+    if unknown:
+        raise QCError(f"Unknown role(s): {', '.join(unknown)}. A user is a reviewer, an editor, or both.")
+    if not roles:
+        raise QCError("A user needs a role: reviewer (the review page), editor (3D Slicer), or both.")
+    return [role for role in ROLES if role in roles]
+
+
+def _account(user: User) -> str:
+    """What an account is, for the audit trail: 'reviewer and editor; receives ...'."""
+    return f"{' and '.join(user.roles)}; receives {DATA_ACCESS_DESCRIPTIONS[user.data_access]}"
+
+
 def _seen(user: User) -> str:
     """Audit note on what a verdict was based on, when that was less than the whole subject."""
     if user.data_access == DEFAULT_DATA_ACCESS:
         return ""
-    return f" The reviewer is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
+    return f" The user is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
 
 
 def _atomic_write_json(path: Path, payload) -> None:
@@ -1154,7 +1217,7 @@ def _replace(source: Path, target: Path) -> None:
     On Windows a file that another process has open at that instant cannot be replaced -- a
     virus scanner or indexer looking at a file just written, or another client on an SMB
     share -- and the refusal clears within milliseconds. Failing at once would lose a
-    reviewer's submission for nothing.
+    user's submission for nothing.
     """
     for delay in _REPLACE_RETRY_DELAYS:
         try:

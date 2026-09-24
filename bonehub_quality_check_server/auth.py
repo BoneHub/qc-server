@@ -2,7 +2,7 @@
 
 Credentials never go on the dataset share. They live in the credentials folder inside the
 container (``BONEHUB_QC_CREDENTIALS_DIR``, a Docker volume on the Docker host), together
-with the reviewer accounts. The server's private key derives reviewer key digests and
+with the user accounts. The server's private key derives the digests of users' API keys and
 compares the admin key, so only ``HMAC-SHA256(private_key, api_key)`` is ever written down.
 
 The credentials folder also holds the server's id. It names the folder on the share where
@@ -58,7 +58,7 @@ def load_or_create_private_key(credentials_dir: Path) -> str:
     """Return the server private key, generating and storing one on first start.
 
     ``BONEHUB_QC_PRIVATE_KEY`` wins when set. Changing the private key invalidates every
-    issued reviewer API key, because the stored digests no longer match.
+    issued API key, because the stored digests no longer match.
     """
     from_env = os.environ.get(ENV_PRIVATE_KEY)
     if from_env:
@@ -97,7 +97,7 @@ def load_or_create_admin_key(credentials_dir: Path) -> tuple[str, bool]:
 
 
 def generate_api_key() -> str:
-    """A fresh reviewer API key. Shown once, then only its digest is kept."""
+    """A fresh API key for a user. Shown once, then only its digest is kept."""
     return API_KEY_PREFIX + secrets.token_urlsafe(API_KEY_BYTES)
 
 

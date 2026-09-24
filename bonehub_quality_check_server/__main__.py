@@ -4,6 +4,7 @@ The container runs ``bonehub-qc-server serve``. Everything else is run inside it
 dataset root and the credentials folder come from the environment:
 
     docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
+    docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --roles editor
     docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
     docker compose exec bonehub-qc-server bonehub-qc-server sessions
 """
@@ -15,7 +16,7 @@ import os
 from pathlib import Path
 
 from .config import ENV_PREFIX, QCServerConfig, resolve_credentials_dir, resolve_state_root
-from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS
+from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS, DEFAULT_ROLES, ROLES
 from .store import QCStore
 
 
@@ -32,6 +33,14 @@ def _add_common(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Where the server keeps its credentials, inside the container. Defaults to $BONEHUB_QC_CREDENTIALS_DIR.",
     )
+
+
+def _roles(text: str) -> list[str]:
+    """``--roles reviewer,editor`` as a list, checked here so that a typo is a usage error."""
+    roles = [role.strip() for role in text.split(",") if role.strip()]
+    if not roles or any(role not in ROLES for role in roles):
+        raise argparse.ArgumentTypeError(f"'{text}' is not one of: reviewer, editor, reviewer,editor")
+    return roles
 
 
 def _dataset_root(args: argparse.Namespace) -> Path:
@@ -61,22 +70,31 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=int(os.environ.get(f"{ENV_PREFIX}PORT", "8000")))
     serve.add_argument("--reload", action="store_true", help="Reload on code changes, for development.")
 
-    add_user = subparsers.add_parser("add-user", help="Create a reviewer and print its API key.")
+    add_user = subparsers.add_parser("add-user", help="Create a user and print its API key.")
     _add_common(add_user)
     add_user.add_argument("--name", required=True)
-    add_user.add_argument("--datasets", default=None, help="Comma-separated dataset ids this reviewer may see.")
+    add_user.add_argument(
+        "--roles",
+        type=_roles,
+        default=list(DEFAULT_ROLES),
+        help=(
+            "What the user may do: reviewer (on the review page), editor (in 3D Slicer), or "
+            "reviewer,editor for both (the default)."
+        ),
+    )
+    add_user.add_argument("--datasets", default=None, help="Comma-separated dataset ids this user may see.")
     add_user.add_argument(
         "--data-access",
         choices=list(DATA_ACCESS_DESCRIPTIONS),
         default=DEFAULT_DATA_ACCESS,
-        help="What the reviewer is sent of each subject (default: %(default)s).",
+        help="What the user is sent of each subject (default: %(default)s).",
     )
     add_user.add_argument("--note", default="")
 
-    list_users = subparsers.add_parser("list-users", help="List reviewers and their progress.")
+    list_users = subparsers.add_parser("list-users", help="List users, their roles and their progress.")
     _add_common(list_users)
 
-    rotate = subparsers.add_parser("rotate-key", help="Issue a new API key for a reviewer.")
+    rotate = subparsers.add_parser("rotate-key", help="Issue a new API key for a user.")
     _add_common(rotate)
     rotate.add_argument("--name", required=True)
 
@@ -120,25 +138,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "add-user":
         datasets = [int(x) for x in args.datasets.split(",")] if args.datasets else None
         user, api_key = store.create_user(
-            name=args.name, allowed_dataset_ids=datasets, note=args.note, data_access=args.data_access
+            name=args.name,
+            allowed_dataset_ids=datasets,
+            note=args.note,
+            data_access=args.data_access,
+            roles=args.roles,
         )
-        print(f"Created reviewer '{user.name}', who is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}.")
+        print(
+            f"Created user '{user.name}', {' and '.join(user.roles)}, who is sent "
+            f"{DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
+        )
         print(f"API key (shown once): {api_key}")
         return 0
 
     if args.command == "list-users":
         users = store.list_users()
         if not users:
-            print("No reviewers yet.")
+            print("No users yet.")
             return 0
         print(
-            f"{'name':<24}{'key':<16}{'active':<8}{'open':<6}{'confirmed':<11}{'rejected':<10}"
+            f"{'name':<24}{'key':<16}{'active':<8}{'roles':<17}{'open':<6}{'confirmed':<11}{'rejected':<10}"
             f"{'receives':<24}datasets"
         )
         for user in users:
             datasets = "all" if user["allowed_dataset_ids"] is None else ",".join(map(str, user["allowed_dataset_ids"]))
             print(
-                f"{user['name']:<24}{user['key_prefix']:<16}{str(user['active']):<8}"
+                f"{user['name']:<24}{user['key_prefix']:<16}{str(user['active']):<8}{','.join(user['roles']):<17}"
                 f"{user['open']:<6}{user['confirmed']:<11}{user['rejected']:<10}{user['data_access']:<24}{datasets}"
             )
         return 0

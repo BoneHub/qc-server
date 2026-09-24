@@ -15,12 +15,17 @@ from fastapi.testclient import TestClient
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server.app import create_app
+from bonehub_quality_check_server.models import EDITOR
 
 from tests.support import LABEL_VALUE, QCTestCase, write_mask
 
 
 class ApiTestCase(QCTestCase):
-    """A running application over a temporary dataset, plus two logged-in clients."""
+    """A running application over a temporary dataset, plus two logged-in clients.
+
+    Both users are reviewers and editors. Requests go out in the editor role, as from 3D
+    Slicer, unless a test names another.
+    """
 
     n_subjects = 3
     config_kwargs: dict = {}
@@ -55,15 +60,16 @@ class ApiTestCase(QCTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()["api_key"]
 
-    def headers(self, api_key: str) -> dict:
-        return {"X-API-Key": api_key}
+    def headers(self, api_key: str, role: str = EDITOR) -> dict:
+        """What a client sends with every request: its key, and the role it works in."""
+        return {"X-API-Key": api_key, "X-Client-Role": role}
 
-    def next_subject(self, api_key: str) -> dict:
-        response = self.client.post("/api/v1/subjects/next", headers=self.headers(api_key))
+    def next_subject(self, api_key: str, role: str = EDITOR) -> dict:
+        response = self.client.post("/api/v1/subjects/next", headers=self.headers(api_key, role))
         self.assertEqual(response.status_code, 200, response.text)
         return response.json()
 
-    def submit(self, api_key: str, assignment_id: str, confirmed: bool, labels=None, **metadata):
+    def submit(self, api_key: str, assignment_id: str, confirmed: bool, labels=None, role: str = EDITOR, **metadata):
         """Post a submission the way the 3D Slicer extension does: multipart."""
         body = {"quality_check_confirmed": confirmed, **metadata}
         files = {"metadata": (None, json.dumps(body))}
@@ -71,7 +77,7 @@ class ApiTestCase(QCTestCase):
             payload = write_mask(self.tmp_path / "post.seg.nrrd", labels).read_bytes()
             files["segmentation"] = ("segmentation.seg.nrrd", payload, "application/octet-stream")
         return self.client.post(
-            f"/api/v1/assignments/{assignment_id}/submit", files=files, headers=self.headers(api_key)
+            f"/api/v1/assignments/{assignment_id}/submit", files=files, headers=self.headers(api_key, role)
         )
 
 

@@ -3,7 +3,7 @@
 Two places, on purpose:
 
 * the credentials folder, inside the container (``BONEHUB_QC_CREDENTIALS_DIR``): the
-  server's id, private key, admin key and reviewer accounts. Never on the dataset share.
+  server's id, private key, admin key and user accounts. Never on the dataset share.
 * ``<dataset_root>/<state_dir_name>/<server_id>/`` on the share: this server's policy
   (``config.json``), assignments, logs and backups. One folder per server, so servers with
   different admins working on one dataset do not overwrite each other.
@@ -66,11 +66,14 @@ class QCServerConfig(BaseModel):
     )
     include_subjects_without_segmentation: bool = Field(
         False,
-        description="Also queue subjects that have an image but no segmentation at all, so reviewers can create one.",
+        description=(
+            "Also queue subjects that have an image but no segmentation at all, so editors can create one "
+            "in 3D Slicer. Reviewers are not handed them."
+        ),
     )
     requeue_rejected: bool = Field(
         False,
-        description="Hand a subject out again after a reviewer submitted it with quality_check_confirmed=false.",
+        description="Hand a subject out again after a user submitted it with quality_check_confirmed=false.",
     )
     allowed_dataset_ids: list[int] | None = Field(
         None,
@@ -85,12 +88,12 @@ class QCServerConfig(BaseModel):
     lease_ttl_seconds: int = Field(
         24 * 3600,
         ge=60,
-        description="How long a reviewer keeps a subject before it returns to the queue.",
+        description="How long a user keeps a subject before it returns to the queue.",
     )
     max_concurrent_assignments_per_user: int = Field(
         1,
         ge=1,
-        description="How many subjects a single reviewer may hold at the same time.",
+        description="How many subjects a single user may hold at the same time.",
     )
     index_refresh_seconds: int = Field(
         300,

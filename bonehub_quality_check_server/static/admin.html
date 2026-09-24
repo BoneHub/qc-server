@@ -88,6 +88,9 @@
   .stat .k { font-size: 12px; color: var(--muted); }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
   .row > div { flex: 1 1 160px; }
+  .checks { display: flex; gap: 12px; align-items: center; min-height: 33px; }
+  .stack { display: flex; flex-direction: column; gap: 2px; }
+  label.inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 13px; color: var(--text); white-space: nowrap; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); }
   .pill.assigned { color: var(--accent); }
   .pill.confirmed { color: var(--ok); }
@@ -123,7 +126,10 @@
       in <code>.env</code> sets it. The key is kept inside the container; print it again with
       <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
     </p>
-    <p class="muted" style="margin-bottom:0">Reviewing subjects? Open the <a href="/review">review page</a> instead.</p>
+    <p class="muted" style="margin-bottom:0">
+      Reviewing subjects? Open the <a href="/review">review page</a> instead. Correcting them? Use the
+      BoneHub Quality Check extension in 3D Slicer.
+    </p>
   </section>
 
   <!-- ------------------------------------------------------------- panel -->
@@ -147,20 +153,29 @@
     </section>
 
     <section>
-      <h2>Create reviewer</h2>
+      <h2>Create user</h2>
       <div class="row">
         <div>
           <label for="newName">Name</label>
           <input id="newName" placeholder="alice" style="width:100%">
         </div>
         <div>
+          <label id="newRolesLabel">Roles</label>
+          <div class="checks" role="group" aria-labelledby="newRolesLabel">
+            <label class="inline" title="Checks subjects in the browser, on the review page">
+              <input type="checkbox" id="newReviewer" checked> Reviewer</label>
+            <label class="inline" title="Corrects segmentations in 3D Slicer">
+              <input type="checkbox" id="newEditor" checked> Editor</label>
+          </div>
+        </div>
+        <div>
           <label for="newDatasets">Dataset ids (optional)</label>
           <input id="newDatasets" placeholder="1,3,10 — blank means all" style="width:100%">
         </div>
         <div>
-          <label for="newAccess">Sent to the reviewer</label>
+          <label for="newAccess">Sent to the user</label>
           <select id="newAccess" style="width:100%"
-                  title="What the reviewer is sent of each subject. A file they are not sent is refused to them.">
+                  title="What the user is sent of each subject. A file they are not sent is refused to them.">
             <option value="image_and_segmentation">Image + segmentation</option>
             <option value="segmentation">Segmentation only</option>
             <option value="image">Image only</option>
@@ -172,6 +187,10 @@
         </div>
         <button class="primary" id="createBtn">Create &amp; issue key</button>
       </div>
+      <p class="muted" style="margin:8px 0 0">
+        A reviewer checks subjects in the browser, on the review page, and confirms or rejects them as they
+        are. An editor corrects segmentations in 3D Slicer. A user can be both.
+      </p>
       <div id="newKeyBox" class="keybox" hidden>
         <strong>API key for <span id="newKeyName"></span></strong>
         <div class="k" id="newKeyValue"></div>
@@ -180,18 +199,15 @@
           <button id="copyInviteBtn">Copy invite link</button>
         </div>
         <div class="k muted" id="newInviteValue" style="margin-top:8px"></div>
-        <p class="muted" style="margin:8px 0 0">
-          Shown once only. The reviewer enters the key in the 3D Slicer extension, or opens the invite
-          link to review in the browser. The link carries the key, so send it privately.
-        </p>
+        <p class="muted" id="newKeyHelp" style="margin:8px 0 0"></p>
       </div>
     </section>
 
     <section>
-      <h2>Reviewers</h2>
+      <h2>Users</h2>
       <div class="scroll"><table>
         <thead><tr>
-          <th>Name</th><th>Key</th><th>Status</th><th class="right">Open</th>
+          <th>Name</th><th>Key</th><th>Status</th><th>Roles</th><th class="right">Open</th>
           <th class="right">Confirmed</th><th class="right">Rejected</th><th>Sent</th><th>Datasets</th><th>Note</th><th></th>
         </tr></thead>
         <tbody id="usersBody"></tbody>
@@ -215,7 +231,7 @@
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>Subject</th><th>Reviewer</th><th>State</th><th>Assigned</th>
+          <th>Subject</th><th>User</th><th>State</th><th>Assigned</th>
           <th>Submitted</th><th>Confirmed labels</th><th></th>
         </tr></thead>
         <tbody id="assignBody"></tbody>
@@ -242,7 +258,7 @@
           <input id="cfgLease" type="number" min="60" style="width:100%">
         </div>
         <div>
-          <label for="cfgMax">Max subjects per reviewer</label>
+          <label for="cfgMax">Max subjects per user</label>
           <input id="cfgMax" type="number" min="1" style="width:100%">
         </div>
         <div>
@@ -271,8 +287,15 @@
 
   var KEY_STORAGE = "bonehub_qc_admin_key";
   var adminKey = null;
+  var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
 
-  // What a reviewer is sent of each subject (User.data_access on the server).
+  // What a user may do (User.roles on the server), and where each role works.
+  var ROLE_OPTIONS = [
+    ["reviewer", "Reviewer", "Checks subjects in the browser, on the review page"],
+    ["editor", "Editor", "Corrects segmentations in 3D Slicer"]
+  ];
+
+  // What a user is sent of each subject (User.data_access on the server).
   var ACCESS_OPTIONS = [
     ["image_and_segmentation", "Image + segmentation"],
     ["segmentation", "Segmentation only"],
@@ -386,9 +409,21 @@
       }).join("") + "</select>";
   }
 
+  // One above the other, so that the table still fits the panel's width.
+  function roleBoxes(user) {
+    return '<div class="stack">' + ROLE_OPTIONS.map(function (option) {
+      var held = (user.roles || []).indexOf(option[0]) !== -1;
+      return '<label class="inline" title="' + esc(option[2]) + '"><input type="checkbox" data-act="role" data-name="' +
+        esc(user.name) + '" data-role="' + option[0] + '"' + (held ? " checked" : "") + "> " + esc(option[1]) +
+        "</label>";
+    }).join("") + "</div>";
+  }
+
   function renderUsers(users) {
+    usersByName = {};
+    users.forEach(function (u) { usersByName[u.name] = u; });
     if (!users.length) {
-      $("usersBody").innerHTML = '<tr><td colspan="10" class="muted">No reviewers yet.</td></tr>';
+      $("usersBody").innerHTML = '<tr><td colspan="11" class="muted">No users yet.</td></tr>';
       return;
     }
     $("usersBody").innerHTML = users.map(function (u) {
@@ -398,6 +433,7 @@
         '<td class="mono">' + esc(u.key_prefix) + "…</td>" +
         '<td><span class="pill ' + (u.active ? "confirmed" : "expired") + '">' +
           (u.active ? "active" : "disabled") + "</span></td>" +
+        '<td class="nowrap">' + roleBoxes(u) + "</td>" +
         '<td class="right">' + esc(u.open) + "</td>" +
         '<td class="right">' + esc(u.confirmed) + "</td>" +
         '<td class="right">' + esc(u.rejected) + "</td>" +
@@ -447,7 +483,9 @@
           : "rejected, dataset unchanged";
         if (e.comment) { detail += " — " + e.comment; }
       } else if (e.kind === "assigned") {
-        detail = "lease until " + shortTime(e.expires_at);
+        detail = (e.role ? "as " + e.role + ", " : "") + "lease until " + shortTime(e.expires_at);
+      } else if (e.kind === "user_created" || e.kind === "user_updated") {
+        detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
       } else if (e.key_prefix) {
         detail = e.key_prefix + "…";
       }
@@ -496,10 +534,25 @@
     return window.location.origin + "/review#key=" + encodeURIComponent(apiKey);
   }
 
-  function showKey(name, apiKey) {
+  // How the key reaches the user depends on where they work: a reviewer gets an invite link to
+  // the review page, an editor enters the key in 3D Slicer.
+  function showKey(name, apiKey, roles) {
+    var reviewer = roles.indexOf("reviewer") !== -1;
+    var editor = roles.indexOf("editor") !== -1;
+    var help = ["Shown once only."];
+    if (reviewer) {
+      help.push("The invite link opens the review page with them signed in. It carries the key, so send it privately.");
+    }
+    if (editor) {
+      help.push("In 3D Slicer, they enter the key and the server URL, " + window.location.origin +
+        ", in the BoneHub Quality Check extension.");
+    }
     $("newKeyName").textContent = name;
     $("newKeyValue").textContent = apiKey;
-    $("newInviteValue").textContent = inviteLink(apiKey);
+    $("newInviteValue").textContent = reviewer ? inviteLink(apiKey) : "";
+    $("newInviteValue").hidden = !reviewer;
+    $("copyInviteBtn").hidden = !reviewer;
+    $("newKeyHelp").textContent = help.join(" ");
     $("newKeyBox").hidden = false;
   }
 
@@ -523,15 +576,21 @@
 
   $("createBtn").addEventListener("click", function () {
     var name = $("newName").value.trim();
-    if (!name) { showError("A reviewer name is required."); return; }
+    if (!name) { showError("A user name is required."); return; }
+    var roles = [];
+    if ($("newReviewer").checked) { roles.push("reviewer"); }
+    if ($("newEditor").checked) { roles.push("editor"); }
     api("POST", "/admin/api/users", {
       name: name,
+      roles: roles,
       allowed_dataset_ids: $("newDatasets").value.trim(),
       data_access: $("newAccess").value,
       note: $("newNote").value.trim()
     }).then(function (result) {
-      showKey(result.user.name, result.api_key);
+      showKey(result.user.name, result.api_key, result.user.roles);
       $("newName").value = "";
+      $("newReviewer").checked = true;
+      $("newEditor").checked = true;
       $("newDatasets").value = "";
       $("newAccess").value = "image_and_segmentation";
       $("newNote").value = "";
@@ -539,11 +598,22 @@
     })["catch"](function (err) { showError(err.message); });
   });
 
+  // What a user is sent, and their roles, are changed in place. A change the server refuses --
+  // such as taking away a user's last role -- is undone by listing the users again.
   $("usersBody").addEventListener("change", function (event) {
-    var select = event.target.closest('select[data-act="access"]');
-    if (!select) { return; }
-    api("PATCH", "/admin/api/users/" + encodeURIComponent(select.getAttribute("data-name")),
-        { data_access: select.value })
+    var target = event.target;
+    var act = target.getAttribute("data-act");
+    var body;
+    if (act === "access") {
+      body = { data_access: target.value };
+    } else if (act === "role") {
+      var boxes = target.closest("tr").querySelectorAll('input[data-act="role"]');
+      body = { roles: Array.prototype.filter.call(boxes, function (box) { return box.checked; })
+        .map(function (box) { return box.getAttribute("data-role"); }) };
+    } else {
+      return;
+    }
+    api("PATCH", "/admin/api/users/" + encodeURIComponent(target.getAttribute("data-name")), body)
       .then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
   });
 
@@ -557,7 +627,7 @@
       if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
       api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
         .then(function (result) {
-          showKey(result.name, result.api_key);
+          showKey(result.name, result.api_key, (usersByName[result.name] || {}).roles || []);
           return refreshAll();
         })["catch"](function (err) { showError(err.message); });
     } else if (act === "toggle") {
@@ -565,7 +635,7 @@
           { active: button.getAttribute("data-active") === "true" })
         .then(refreshAll)["catch"](function (err) { showError(err.message); });
     } else if (act === "delete") {
-      if (!window.confirm("Delete reviewer '" + name + "'? Their open subjects return to the queue.")) { return; }
+      if (!window.confirm("Delete user '" + name + "'? Their open subjects return to the queue.")) { return; }
       api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
         .then(refreshAll)["catch"](function (err) { showError(err.message); });
     }

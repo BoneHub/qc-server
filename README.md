@@ -4,27 +4,29 @@ Server side of a client–server setup for human-in-the-loop quality check of se
 in the [BoneHub Dataset](https://github.com/BoneHub/BoneHub-Dataset).
 
 It points at a folder that is already in BoneHub data structure format, hands subjects out
-one at a time to authenticated reviewers, and receives their verdicts back. Reviewers work
-either in the browser, on the server's own [review page](#reviewing-in-the-browser), which
-needs no installation but cannot edit, or in 3D Slicer with the BoneHub extension, where they
-can correct the segmentation. When a reviewer confirms a subject, the labels they vouch for
-are set to status `2` ("available, reviewed and corrected") in `Subject_info_XXX.json`,
-whatever status they had before, and a corrected segmentation from 3D Slicer replaces the
-one in the dataset. Rejected subjects leave the dataset untouched and are only recorded in
-the audit trail.
+one at a time to authenticated users, and receives their verdicts back. Each user is a
+**reviewer**, an **editor**, or both. Reviewers work in the browser, on the server's own
+[review page](#reviewing-in-the-browser), which needs no installation but cannot edit.
+Editors work in 3D Slicer with the BoneHub extension, where they can correct the
+segmentation. When a subject is confirmed, the labels vouched for are set to status `2`
+("available, reviewed and corrected") in `Subject_info_XXX.json`, whatever status they had
+before, and a corrected segmentation from 3D Slicer replaces the one in the dataset.
+Rejected subjects leave the dataset untouched and are only recorded in the audit trail.
 
 The server runs in Docker; there is no other supported way to run it.
 
 ## Features
 
-- Leased assignments: a reviewer holds a subject for a limited time, after which it returns
-  to the queue automatically.
-- Per-reviewer API keys, optionally restricted to specific dataset ids, and a per-reviewer
-  choice of what they are sent of each subject: the image and its segmentation, the
-  segmentation only, or the image only.
+- Leased assignments: a user holds a subject for a limited time, after which it returns to
+  the queue automatically.
+- Per-user API keys and [roles](#users-and-roles): a reviewer works on the review page, an
+  editor in 3D Slicer, and a user may be both. Keys can be restricted to specific dataset
+  ids, and each user has a choice of what they are sent of each subject: the image and its
+  segmentation, the segmentation only, or the image only.
 - Browser review page at `/review`: a reviewer opens a link, looks at the subject in 3D and
   in slices, and confirms or rejects it. Everything is rendered in the reviewer's browser.
-- Browser admin panel at `/admin` for reviewers, queue statistics, submissions and config.
+- Browser admin panel at `/admin` for users and their roles, queue statistics, submissions
+  and config.
 - Validation of every upload (BoneHub `.seg.nrrd` format, every segment a BoneHub label,
   geometry match against the subject's image, size cap). The dataset receives the upload
   rewritten in canonical form, and the previous segmentation is backed up first.
@@ -52,7 +54,8 @@ docker compose logs | grep -A2 "admin key"    # a new server prints its admin ke
 ```
 
 Open `http://<host>:8000/admin` and log in with that key. Reviewers use
-`http://<host>:8000/review`.
+`http://<host>:8000/review`; editors connect the 3D Slicer extension to
+`http://<host>:8000`.
 
 The dataset is mounted over SMB, configured by four values in `.env`:
 
@@ -81,11 +84,15 @@ That volume holds no data of its own — only the mount to the share — so noth
 For a dataset on a local disk, [`docker-compose.yml`](docker-compose.yml) ends with the
 bind-mount alternative.
 
-To update the server, pull and rebuild; the server keeps its admin key and reviewers:
+To update the server, pull and rebuild; the server keeps its admin key and users:
 
 ```bash
 git pull && docker compose up -d --build
 ```
+
+Update the 3D Slicer extension together with the server: since 0.3 every client names its
+role in each request, and the server refuses an extension from before that with a message
+saying to update it.
 
 ## Administration
 
@@ -102,37 +109,54 @@ docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
 or start a new server, which issues a new admin key (see
 [Where the server keeps things](#where-the-server-keeps-things)).
 
-### Reviewers
+### Users and roles
 
 From the admin panel, or with the server's command line inside the running container:
 
 ```bash
 docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
-docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --datasets 1,2
-docker compose exec bonehub-qc-server bonehub-qc-server add-user --name carol --data-access segmentation
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --roles reviewer --datasets 1,2
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name carol --roles editor
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name dave --roles reviewer --data-access segmentation
 docker compose exec bonehub-qc-server bonehub-qc-server list-users
 docker compose exec bonehub-qc-server bonehub-qc-server rotate-key --name alice
 ```
 
-The reviewer API key is shown once, at creation. The admin panel shows it together with an
-**invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs the reviewer in to
-the review page by itself. The part after `#` never reaches the server, so the key stays out
-of its logs; the link is the credential all the same, so send it privately. For 3D Slicer,
-hand over the key and the server URL, which the reviewer enters in the extension. The
-running server sees a reviewer added from the command line at once.
+**Roles.** Each user is a reviewer, an editor, or both, which is the default (`--roles` on
+the command line, two tick boxes in the admin panel):
 
-**What a reviewer is sent** is set per reviewer when creating them, and can be changed in the
-Reviewers table at any time (`--data-access` on the command line):
+| Role | Works in | Can |
+| --- | --- | --- |
+| Reviewer | the review page, `/review` | look at a subject, confirm the stored segmentation as it is, reject, release. Is not handed subjects without a segmentation |
+| Editor | 3D Slicer, with the BoneHub Quality Check extension | correct the segmentation and upload it, or create one for a subject that has none; reject, release |
+
+Each client names the role it works in, and the server refuses a user who does not hold it,
+on every request: a reviewer connecting from 3D Slicer is told to use the review page, with
+its address, and an editor cannot sign in to the review page. A user with both roles can use
+both. What a role may do to the dataset is checked against the account itself, whichever
+client a request comes from: only an editor uploads a segmentation, and only a reviewer
+confirms the stored one as it is. Roles can be changed in the Users table at any time and
+apply from the user's next request; a user needs at least one. Users created before server
+0.3 hold both roles.
+
+The API key is shown once, at creation. For a reviewer the admin panel shows it together with
+an **invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs them in to the
+review page by itself. The part after `#` never reaches the server, so the key stays out of
+its logs; the link is the credential all the same, so send it privately. For an editor, hand
+over the key and the server URL, which they enter in the 3D Slicer extension. The running
+server sees a user added from the command line at once.
+
+**What a user is sent** is set per user when creating them, and can be changed in the Users
+table at any time (`--data-access` on the command line):
 
 | Setting | Sent | They can |
 | --- | --- | --- |
-| Image + segmentation (default) | both | review, confirm, reject; correct in 3D Slicer |
-| Segmentation only | the segmentation | review the labels without the image, confirm, reject. Not given subjects without a segmentation. Cannot open subjects in 3D Slicer, which needs the image |
-| Image only | the image | reject with a comment, or release. Cannot confirm or replace a segmentation they have not seen, so in 3D Slicer they can only create one for a subject that has none |
+| Image + segmentation (default) | both | whatever their roles allow |
+| Segmentation only | the segmentation | as a reviewer, look at the labels without the image, confirm, reject. Not given subjects without a segmentation. Of no use to an editor: 3D Slicer needs the image |
+| Image only | the image | reject with a comment, or release. Cannot confirm or replace a segmentation they have not seen, so as an editor they can only create one for a subject that has none |
 
-A file a reviewer is not sent is left out of their handout and refused at its download
-endpoint, whichever client asks. Every verdict records the reviewer's setting in the audit
-trail.
+A file a user is not sent is left out of their handout and refused at its download endpoint,
+whichever client asks. Every verdict records the user's setting in the audit trail.
 
 ### Other commands
 
@@ -151,14 +175,14 @@ Endpoints:
 | `/admin` | Admin panel (asks for the admin key) |
 | `/docs` | Interactive OpenAPI documentation |
 | `/health` | Unauthenticated liveness probe |
-| `/api/v1/...` | Client API, authenticated with `X-API-Key` |
+| `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
 | `/static/...` | The pages' script and the vendored NiiVue viewer |
 
 ## Reviewing in the browser
 
-The review page at `/review` is for reviewers who only need to look: nothing to install, and
+The review page at `/review` is for reviewers, who only need to look: nothing to install, and
 all rendering happens in the reviewer's browser with [NiiVue](https://github.com/niivue/niivue),
-so the server only sends files. A reviewer:
+so the server only sends files. A user who is not a reviewer is refused at sign-in. A reviewer:
 
 1. opens the invite link, or `/review` and enters their key. "Remember" keeps the key in this
    browser; otherwise it is forgotten when the tab closes;
@@ -175,12 +199,12 @@ so the server only sends files. A reviewer:
 The page cannot edit. **Confirm** vouches for the stored segmentation as it is: the ticked
 labels are set to `2`, and the file is left untouched (`use_stored_segmentation` in the API).
 A rejection records the verdict and comment, and changes nothing. Corrections are made in 3D
-Slicer.
+Slicer, by an editor.
 
 A stored segmentation that is not on its image's voxel grid cannot be confirmed as it is.
 The server holds it to the same geometry check as an upload (`require_geometry_match`), so
-the page says so and offers Reject instead. Correcting the subject in 3D Slicer writes the
-segmentation back on the image's grid.
+the page says so and offers Reject instead. An editor correcting the subject in 3D Slicer
+writes the segmentation back on the image's grid.
 
 **Large scans.** The browser needs several copies of a volume in GPU memory, and in testing a
 450-million-voxel whole-body CT would not display at full resolution. The page therefore
@@ -191,7 +215,7 @@ the machine it was tested on, a 150–450-million-voxel CT took 15–25 seconds 
 downloaded, and 1.5–3 GB of browser memory; a small scan opens in a few seconds.
 
 **Browsers.** A current Chrome, Edge, Firefox or Safari with WebGL 2. Use HTTPS in front of
-the server when reviewers connect over anything but a trusted network: the API key and the
+the server when users connect over anything but a trusted network: the API key and the
 images travel in every request.
 
 NiiVue is vendored as one self-contained file in
@@ -208,8 +232,8 @@ update.
 
 ## Where the server keeps things
 
-**Credentials** — the server's id, its private key, the admin key, and the reviewer
-accounts with their key digests — are kept inside the container, in `/var/lib/bonehub-qc`,
+**Credentials** — the server's id, its private key, the admin key, and the user accounts
+with their roles and key digests — are kept inside the container, in `/var/lib/bonehub-qc`,
 which docker-compose mounts from the `bonehub_qc_credentials` volume on the Docker host.
 They are never written to the dataset share, and the server refuses to start if its
 credentials folder is inside the dataset.
@@ -231,14 +255,14 @@ The credentials volume *is* the server:
 
 | You run | What happens |
 | --- | --- |
-| `docker compose up -d`, `restart`, `up -d --build` | Same server: same admin key, reviewers and state folder |
-| `docker compose down -v`, then `up -d` | A **new** server: a new id and state folder, a new admin key (printed once), no reviewers. The old server's folder stays on the share as history |
+| `docker compose up -d`, `restart`, `up -d --build` | Same server: same admin key, users and state folder |
+| `docker compose down -v`, then `up -d` | A **new** server: a new id and state folder, a new admin key (printed once), no users. The old server's folder stays on the share as history |
 
 Several servers, each with its own admin, can therefore work on one dataset — from
 different machines, or one after the other — without overwriting each other: each has its
 own state folder, and a server does not hand out a subject that another one has out for
 review. `bonehub-qc-server sessions` lists them. Changing `BONEHUB_QC_PRIVATE_KEY`
-invalidates every reviewer API key already issued.
+invalidates every API key already issued.
 
 ## Dataset format
 
@@ -266,14 +290,22 @@ segmentation as it is, read "the stored segmentation" for "the upload":
 
 | Label | New status |
 | --- | --- |
-| In the upload and vouched for by the reviewer | `2` |
+| In the upload and vouched for by the user | `2` |
 | In the upload, not vouched for | unchanged; `1` if it was absent or `0` |
 | In the dataset but no longer in the upload | `0` (with `mark_removed_labels_absent`, the default) |
+
+### Upgrading from server 0.2
+
+Server 0.2 knew no roles: every user could work in both clients. The users it created are
+kept, as reviewers and editors both, so nobody is locked out; take away the role a user
+should not have in the Users table. Every client now names its role in each request, so
+update the 3D Slicer extension along with the server. The review page is served by the
+server itself and needs nothing.
 
 ### Upgrading from server 0.1
 
 Server 0.1 used the pre-0.3 label statuses (`-1`…`3`) and NIfTI segmentations, and kept
-everything — its keys and reviewers included — directly in `<dataset-root>/.bonehub_qc/`.
+everything — its keys and user accounts included — directly in `<dataset-root>/.bonehub_qc/`.
 The new server reads none of those files:
 
 - Regenerate the datasets with the schema 0.3 converters; the server skips the others.
@@ -281,24 +313,28 @@ The new server reads none of those files:
   `<dataset-root>/.bonehub_qc/`. The server warns at every start while they are there, but
   deletes nothing on the share itself. The old `assignments.json`, `submissions.jsonl`,
   `server.log` and `backups/` can stay as history.
-- Reviewers need new keys from the new server.
+- Users need new keys from the new server.
 - `BONEHUB_QC_ELIGIBLE_LABEL_VALUES` in `.env` is read in the new statuses: `1` queues the
   subjects nobody has reviewed yet.
 
 ## Client flow
 
-The 3D Slicer extension and the review page follow the same sequence:
+Every request carries the user's key in `X-API-Key` and the role the client works in in
+`X-Client-Role`: `editor` from the 3D Slicer extension, `reviewer` from the review page. A
+request without the role, or in a role the user does not hold, is refused (400 and 403). The
+two clients follow the same sequence:
 
-1. `GET /api/v1/ping` — check the key; reports the server's `schema_version` and the
-   reviewer's `data_access`
+1. `GET /api/v1/ping` — check the key and its role; reports the server's `schema_version`,
+   the user's `roles`, the `role` of this request, and the user's `data_access`
 2. `GET /api/v1/labels` — the label map and label statuses
 3. `POST /api/v1/subjects/next` — lease the next subject
 4. `GET /api/v1/assignments/{id}/image` — download the image (`.nii.gz`)
 5. `GET /api/v1/assignments/{id}/segmentation` — download the segmentation (`.seg.nrrd`), if any
-6. `POST /api/v1/assignments/{id}/submit` — send the verdict back, with the reviewed `.seg.nrrd`,
-   or with `use_stored_segmentation: true` in the metadata to confirm the stored one as it is
+6. `POST /api/v1/assignments/{id}/submit` — send the verdict back: an editor with the
+   corrected `.seg.nrrd`, a reviewer with `use_stored_segmentation: true` in the metadata to
+   confirm the stored one as it is
 
-The handout says what there is for this reviewer to download (`has_image`,
+The handout says what there is for this user to download (`has_image`,
 `has_segmentation`, and a URL for each), which follows their `data_access`. With the
 segmentation it also carries `segments`, read from the file header: each segment's number,
 BoneHub label and value, colour and bounding box. It also carries
@@ -306,7 +342,8 @@ BoneHub label and value, colour and bounding box. It also carries
 there is a reason.
 
 [`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client
-for the same API; it is the file shipped inside the Slicer extension:
+for the same API; it is the file shipped inside the Slicer extension. It works as an editor,
+unless it is given `role="reviewer"`:
 
 ```python
 from pathlib import Path
@@ -316,7 +353,7 @@ client = BoneHubQCClient("http://localhost:8000", "bhqc_...")
 handout = client.next_subject()
 client.download_image(handout["assignment_id"], Path("image.nii.gz"))
 client.download_segmentation(handout["assignment_id"], Path("segmentation.seg.nrrd"))
-# ... review in 3D Slicer ...
+# ... correct in 3D Slicer ...
 client.submit(handout["assignment_id"], quality_check_confirmed=True,
               segmentation_path=Path("reviewed.seg.nrrd"))
 ```
@@ -336,10 +373,10 @@ variable set in `.env` wins over the stored value at every start. The most used 
 | --- | --- | --- |
 | `allowed_dataset_ids` | `null` | Restrict the server to these dataset ids; `null` means every dataset under the root |
 | `eligible_label_values` | `[1]` | Label statuses that queue a subject (`1` not reviewed, `2` reviewed) |
-| `include_subjects_without_segmentation` | `false` | Also queue subjects with an image but no available label, to segment from scratch |
-| `mark_removed_labels_absent` | `true` | Set a label deleted by the reviewer to `0` |
-| `lease_ttl_seconds` | `86400` | How long a reviewer keeps a subject |
-| `max_concurrent_assignments_per_user` | `1` | Subjects one reviewer may hold at once |
+| `include_subjects_without_segmentation` | `false` | Also queue subjects with an image but no available label, for editors to segment from scratch |
+| `mark_removed_labels_absent` | `true` | Set a label deleted by the editor to `0` |
+| `lease_ttl_seconds` | `86400` | How long a user keeps a subject |
+| `max_concurrent_assignments_per_user` | `1` | Subjects one user may hold at once |
 | `assignment_strategy` | `sequential` | `sequential` or `random` handout order |
 | `requeue_rejected` | `false` | Hand rejected subjects out again |
 | `require_geometry_match` | `true` | Reject uploads whose voxel grid differs from the image |
@@ -369,19 +406,20 @@ To run one module or one test, replace the last command, for example with
 | Module | What it covers |
 | --- | --- |
 | `test_config.py` | The policy file, its `BONEHUB_QC_*` overrides, and a policy stored under another schema |
-| `test_auth.py` | Server id, private key, per-reviewer API keys, disabling and rotation, accounts changed from the CLI |
+| `test_auth.py` | Server id, private key, per-user API keys, disabling and rotation, accounts changed from the CLI |
+| `test_roles.py` | Reviewers and editors: the roles of an account, which client each role may use, how each may confirm, the queue each is handed, the admin panel, the CLI and the reference client |
 | `test_sessions.py` | Credentials kept off the share, the admin key printed once, several servers on one dataset |
 | `test_queue.py` | Which subjects are queued, schema versions, restricting the server to specific datasets, broken dataset folders |
 | `test_assignment.py` | Who gets which subject, leases, expiry, release, requeue policy |
 | `test_submission.py` | Confirmed submissions marking labels reviewed (2), the `.seg.nrrd` format and its validation, rejections changing nothing, partial uploads, audit trail |
 | `test_confirm_as_is.py` | Confirming the stored segmentation as it is, the geometry check on it, and who may confirm or replace a segmentation |
-| `test_data_access.py` | What a reviewer is sent of each subject, in the handout, the downloads, the queue, the admin panel and the CLI |
+| `test_data_access.py` | What a user is sent of each subject, in the handout, the downloads, the queue, the admin panel and the CLI |
 | `test_review_page.py` | The review page's files, what is installed with the package, the vendored NiiVue build, and the segment table in the handout |
 | `test_api.py` | The REST API over HTTP, as the 3D Slicer extension calls it |
 | `test_admin.py` | The admin panel endpoints behind the admin key |
 | `test_client.py` | `client.py` against a real uvicorn server on a real socket |
 | `test_cli.py` | `bonehub-qc-server` commands |
-| `test_concurrency.py` | Several reviewers hitting the server at once |
+| `test_concurrency.py` | Several users hitting the server at once |
 | `test_deployment.py` | Start-up from environment variables only, the credentials volume, and the shipped docker files |
 
 `tests/support.py` holds the dataset builder and the base test case.

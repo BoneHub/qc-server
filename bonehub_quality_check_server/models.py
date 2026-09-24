@@ -4,15 +4,30 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 AssignmentState = Literal["assigned", "confirmed", "rejected", "released", "expired"]
 
 #: States in which a subject is finished and is never handed out again.
 TERMINAL_STATES: set[str] = {"confirmed"}
 
-#: What a reviewer is sent of each subject. A file a reviewer is not sent is left out of
-#: the handout and refused at its download endpoint.
+#: What a user may do, and so which client they may use. A reviewer looks at subjects on the
+#: browser review page and confirms the stored segmentation as it is, or rejects it; an editor
+#: corrects segmentations in 3D Slicer and uploads them. A user holds one role or both.
+Role = Literal["reviewer", "editor"]
+
+REVIEWER: Role = "reviewer"
+EDITOR: Role = "editor"
+
+#: Every role, in the order a user's roles are listed.
+ROLES: tuple[Role, ...] = (REVIEWER, EDITOR)
+
+#: The roles of a new user unless others are chosen, and of an account written before roles
+#: existed, which could use both clients.
+DEFAULT_ROLES: tuple[Role, ...] = ROLES
+
+#: What a user is sent of each subject. A file a user is not sent is left out of the handout
+#: and refused at its download endpoint.
 DataAccess = Literal["image_and_segmentation", "segmentation", "image"]
 
 DEFAULT_DATA_ACCESS: DataAccess = "image_and_segmentation"
@@ -25,26 +40,47 @@ DATA_ACCESS_DESCRIPTIONS: dict[str, str] = {
 
 
 class User(BaseModel):
-    """A reviewer. The API key itself is never stored, only its HMAC digest."""
+    """A user: a reviewer, an editor, or both. The API key itself is never stored, only its HMAC digest."""
 
-    name: str = Field(..., description="Unique reviewer name, used as the login identity")
+    name: str = Field(..., description="Unique user name, used as the login identity")
     key_prefix: str = Field(..., description="First characters of the API key, shown in the admin panel")
     key_hash: str = Field(..., description="HMAC-SHA256 of the API key, keyed with the server private key")
     created_at: str = Field(..., description="ISO-8601 UTC timestamp")
     active: bool = Field(True, description="Disabled users are rejected at authentication")
+    roles: list[Role] = Field(
+        default_factory=lambda: list(DEFAULT_ROLES),
+        description="What this user may do: 'reviewer' (the browser review page), 'editor' (3D Slicer), or both.",
+    )
     allowed_dataset_ids: list[int] | None = Field(
-        None, description="Restrict this reviewer to these dataset ids. None means every dataset the server serves."
+        None, description="Restrict this user to these dataset ids. None means every dataset the server serves."
     )
     data_access: DataAccess = Field(
         DEFAULT_DATA_ACCESS,
         description=(
-            "What this reviewer is sent of each subject: 'image_and_segmentation', 'segmentation' "
+            "What this user is sent of each subject: 'image_and_segmentation', 'segmentation' "
             "(the segmentation only) or 'image' (the image only)."
         ),
     )
     note: str = Field("", description="Free-form note for the administrator")
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    @field_validator("roles")
+    @classmethod
+    def _each_role_once(cls, roles: list[str]) -> list[str]:
+        """Each role once, in the order of ROLES. A user without a role could use no client at all."""
+        ordered = [role for role in ROLES if role in roles]
+        if not ordered:
+            raise ValueError("a user needs at least one role")
+        return ordered
+
+    @property
+    def is_reviewer(self) -> bool:
+        return REVIEWER in self.roles
+
+    @property
+    def is_editor(self) -> bool:
+        return EDITOR in self.roles
 
     @property
     def receives_image(self) -> bool:
@@ -60,7 +96,7 @@ class User(BaseModel):
 
 
 class Assignment(BaseModel):
-    """One subject handed to one reviewer."""
+    """One subject handed to one user."""
 
     assignment_id: str
     subject_key: str = Field(..., description="'<dataset_id:03d>_<subject_id:06d>'")
@@ -100,8 +136,8 @@ class HandoutSegment(BaseModel):
 class SubjectHandout(BaseModel):
     """What a client receives when it asks for the next subject.
 
-    ``has_image`` and ``has_segmentation`` say whether there is a file for this reviewer to
-    download: the server has it and the reviewer's ``data_access`` includes it.
+    ``has_image`` and ``has_segmentation`` say whether there is a file for this user to
+    download: the server has it and the user's ``data_access`` includes it.
     """
 
     assignment_id: str
@@ -109,7 +145,7 @@ class SubjectHandout(BaseModel):
     subject_id: int
     subject_key: str
     expires_at: str
-    data_access: DataAccess = Field(DEFAULT_DATA_ACCESS, description="What this reviewer is sent of each subject")
+    data_access: DataAccess = Field(DEFAULT_DATA_ACCESS, description="What this user is sent of each subject")
     has_image: bool
     has_segmentation: bool
     segmentation_labels: dict[str, int] = Field(
@@ -143,19 +179,19 @@ class SubmissionRequest(BaseModel):
     confirmed_labels: list[str] | None = Field(
         None,
         description=(
-            "Labels the reviewer vouches for. Defaults to every label found in the confirmed segmentation. "
+            "Labels the user vouches for. Defaults to every label found in the confirmed segmentation. "
             "Ignored when quality_check_confirmed is false."
         ),
     )
     use_stored_segmentation: bool = Field(
         False,
         description=(
-            "Confirm the segmentation the server already holds, as it is, instead of uploading one. "
-            "For clients that only look, such as the browser review page. Ignored when "
-            "quality_check_confirmed is false."
+            "Confirm the segmentation the server already holds, as it is, instead of uploading one: how "
+            "a reviewer confirms, on the browser review page. Uploading a segmentation takes an editor. "
+            "Ignored when quality_check_confirmed is false."
         ),
     )
-    comment: str | None = Field(None, description="Free-form reviewer comment, kept in the audit log")
+    comment: str | None = Field(None, description="Free-form comment, kept in the audit log")
 
     model_config = ConfigDict(extra="forbid")
 
