@@ -162,11 +162,33 @@
 
   .labels { display: flex; flex-direction: column; }
   .lrow {
-    display: grid; grid-template-columns: 18px 12px minmax(0, 1fr) auto 26px 26px;
+    display: grid; grid-template-columns: 50px 12px minmax(0, 1fr) auto 26px 26px;
     align-items: center; gap: 6px; padding: 3px 4px; border-radius: 5px;
   }
   .lrow:hover { background: var(--row-hover); }
   .lrow input { margin: 0; }
+  .verdict { display: inline-flex; }
+  .verdict button {
+    width: 25px; height: 22px; padding: 0; font-size: 13px; line-height: 1; color: var(--muted);
+    border-radius: 0; margin-left: -1px;
+  }
+  .verdict button:first-child { border-radius: 5px 0 0 5px; margin-left: 0; }
+  .verdict button:last-child { border-radius: 0 5px 5px 0; }
+  .verdict button.accept[aria-pressed="true"] { background: var(--ok); border-color: var(--ok); color: var(--accent-text); }
+  .verdict button.reject[aria-pressed="true"] { background: var(--danger); border-color: var(--danger); color: var(--accent-text); }
+  .lreason { grid-column: 3 / -1; font-size: 12px; padding: 2px 4px; margin: 0 0 3px; }
+  .lrow.rejected .lname { color: var(--danger); }
+  .missing { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .missing .row { display: flex; gap: 6px; }
+  .missing .row input { flex: 1; font-size: 12px; padding: 4px 6px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; padding: 1px 4px 1px 8px; border-radius: 999px;
+          border: 1px solid var(--danger); color: var(--danger); }
+  .chip button { border: none; background: none; color: inherit; padding: 0 4px; font-size: 14px; line-height: 1; }
+  .history { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; }
+  .history li { margin-top: 4px; }
+  .history .who { color: var(--muted); }
+  .stage { margin-top: 6px; }
   .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.25); }
   .lname {
     border: none; background: none; padding: 1px 0; text-align: left; font-size: 12px;
@@ -182,7 +204,7 @@
   .icon svg { width: 16px; height: 16px; }
   .icon[aria-pressed="true"] { color: var(--accent); }
   .lrow.hidden-label .lname, .lrow.hidden-label .swatch { opacity: .35; }
-  .lrow.absent { grid-template-columns: 18px 12px minmax(0, 1fr) auto; }
+  .lrow.absent { grid-template-columns: 50px 12px minmax(0, 1fr) auto; }
   .lrow.absent .lname { font-style: italic; color: var(--muted); cursor: default; }
   .lrow.absent .lname:hover { text-decoration: none; }
   .lrow.listed .lname { font-style: normal; color: var(--text); }
@@ -325,16 +347,26 @@
           <button class="small" id="extendBtn" title="Keep this subject for another lease period">Extend</button>
         </div>
         <div id="subjectNotes"></div>
+        <ul class="history" id="historyList" hidden></ul>
       </section>
 
       <section class="card" id="labelsCard" hidden>
         <div class="card-head">
           <h2 id="labelsTitle">Labels</h2>
-          <button class="small" id="tickAllBtn">Tick all</button>
-          <button class="small" id="tickNoneBtn">Untick all</button>
+          <button class="small" id="acceptAllBtn" title="Accept every label under review">Accept all</button>
+          <button class="small" id="rejectAllBtn" title="Reject every label under review">Reject all</button>
         </div>
         <div class="labels" id="labelsList"></div>
         <div class="labels-foot muted" id="labelsFoot"></div>
+        <div class="missing" id="missingBox">
+          <label class="field" for="missingInput">A bone the segmentation lacks</label>
+          <div class="row">
+            <input id="missingInput" list="labelNames" placeholder="Label name, e.g. TIBIA_LEFT" autocomplete="off" spellcheck="false">
+            <button class="small" id="missingAddBtn">Report missing</button>
+          </div>
+          <datalist id="labelNames"></datalist>
+          <div class="chips" id="missingList"></div>
+        </div>
       </section>
 
       <section class="card" id="verdictCard" hidden>
@@ -342,10 +374,13 @@
         <label class="field" for="comment">Comment</label>
         <textarea id="comment" placeholder="What is wrong, or anything worth recording" maxlength="4000"></textarea>
         <div class="actions">
-          <button class="primary" id="confirmBtn">Confirm</button>
-          <button class="danger" id="rejectBtn">Reject</button>
+          <button class="primary" id="confirmBtn">Submit verdict</button>
+          <button class="danger" id="rejectBtn" title="Reject every label under review: the subject goes to the editors">Reject subject</button>
           <button id="releaseBtn" title="Give the subject back without a verdict">Release</button>
         </div>
+        <p class="muted" style="font-size:12px;margin:8px 0 0">
+          Your verdict waits on the server. Nothing is written into the dataset until the administrator approves the subject.
+        </p>
         <label class="check"><input type="checkbox" id="autoNext"> Open the next subject after submitting</label>
         <div id="verdictMessage"></div>
       </section>

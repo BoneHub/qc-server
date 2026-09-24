@@ -18,6 +18,8 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
+from bonehub_quality_check_server.config import QCServerConfig
+from bonehub_quality_check_server.models import REJECT_REASONS, SubmissionRequest
 from bonehub_quality_check_server.review import STATIC_DIR
 from bonehub_quality_check_server.segmentation import SegmentationError, read_segment_table
 
@@ -119,6 +121,38 @@ class UpdateScriptTests(unittest.TestCase):
     def test_an_unexpected_layout_is_refused(self):
         with self.assertRaises(SystemExit):
             self.tool.decode_bundle("export default {}")
+
+
+class PageContractTests(unittest.TestCase):
+    """The pages cannot import the server's names, so they must spell them as the server does."""
+
+    def read(self, name: str) -> str:
+        return (STATIC_DIR / name).read_text(encoding="utf-8")
+
+    def test_the_review_page_knows_every_reason_to_reject_a_label(self):
+        match = re.search(r"const REASON_TEXT = \{([^}]*)\}", self.read("review.js"))
+        self.assertIsNotNone(match, "review.js names the reasons in REASON_TEXT")
+        self.assertEqual(set(re.findall(r"(\w+):", match.group(1))), set(REJECT_REASONS))
+
+    def test_the_review_page_sends_the_verdict_the_server_reads(self):
+        script = self.read("review.js")
+        sent = {"quality_check_confirmed", "use_stored_segmentation", "confirmed_labels", "rejected_labels", "missing_labels", "comment"}
+        self.assertEqual(sent, set(SubmissionRequest.model_fields))
+        for field in sent:
+            self.assertIn(field, script)
+
+    def test_the_admin_panel_saves_only_settings_the_server_has(self):
+        page = self.read("admin.html")
+        match = re.search(r'api\("PUT", "/admin/api/config", \{(.*?)\}\)', page, re.S)
+        self.assertIsNotNone(match)
+        saved = set(re.findall(r"^\s*(\w+):", match.group(1), re.M))
+        self.assertIn("edits_need_review", saved)
+        self.assertEqual(saved - set(QCServerConfig.model_fields), set())
+
+    def test_the_admin_panel_approves_through_the_case_endpoints(self):
+        page = self.read("admin.html")
+        for endpoint in ('"/admin/api/cases/approve"', '"/approve"', '"/return"', '"/close"', '"/segmentation"'):
+            self.assertIn(endpoint, page)
 
 
 class SegmentTableTests(QCTestCase):

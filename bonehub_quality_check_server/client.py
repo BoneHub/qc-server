@@ -16,6 +16,15 @@ refuses an upload in any other format.
 
 A client works in one role, which it names in every request: ``editor``, the role of 3D
 Slicer, by default. The server refuses the key of an account that does not hold the role.
+An editor uploads the corrected segmentation, as above; a reviewer judges the segmentation
+as it is, label by label::
+
+    reviewer = BoneHubQCClient("http://localhost:8000", "bhqc_...", role="reviewer")
+    handout = reviewer.next_subject()
+    reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True,
+                    confirmed_labels=["FEMUR_LEFT"], rejected_labels={"FEMUR_RIGHT": "quality"})
+
+Verdicts wait on the server until its administrator approves the subject into the dataset.
 """
 
 from __future__ import annotations
@@ -36,7 +45,7 @@ DEFAULT_TIMEOUT = 300
 ROLE_HEADER = "X-Client-Role"
 
 #: The roles a client can work in: an editor corrects segmentations and uploads them, as
-#: 3D Slicer does; a reviewer confirms or rejects them as they are, as the review page does.
+#: 3D Slicer does; a reviewer accepts or rejects each label as it is, as the review page does.
 EDITOR = "editor"
 REVIEWER = "reviewer"
 
@@ -97,18 +106,29 @@ class BoneHubQCClient:
         segmentation_path: Path | None = None,
         confirmed_labels: list[str] | None = None,
         comment: str | None = None,
+        use_stored_segmentation: bool = False,
+        rejected_labels: dict | None = None,
+        missing_labels: list[str] | None = None,
     ) -> dict:
-        """Send the verdict back.
+        """Send the verdict back. The server keeps it until its administrator approves the subject.
 
-        A confirmed submission must carry the reviewed segmentation; a rejection changes
-        nothing in the dataset and needs no file.
+        An editor's confirmed submission carries the corrected segmentation. A reviewer's
+        judges the segmentation as it is (``use_stored_segmentation``), with labels accepted
+        (``confirmed_labels``), rejected (``rejected_labels``, label -> "quality" or "absent")
+        and reported missing (``missing_labels``). A rejection needs no file.
         """
-        if quality_check_confirmed and segmentation_path is None:
-            raise QCClientError("A confirmed submission must include the reviewed segmentation file.")
+        if quality_check_confirmed and segmentation_path is None and not use_stored_segmentation:
+            raise QCClientError(
+                "A confirmed submission must include the corrected segmentation file, or judge the stored "
+                "segmentation as it is (use_stored_segmentation)."
+            )
 
         metadata = {
             "quality_check_confirmed": bool(quality_check_confirmed),
             "confirmed_labels": confirmed_labels,
+            "rejected_labels": dict(rejected_labels) if rejected_labels else None,
+            "missing_labels": list(missing_labels) if missing_labels else None,
+            "use_stored_segmentation": bool(use_stored_segmentation),
             "comment": comment,
         }
         fields = {"metadata": json.dumps(metadata)}

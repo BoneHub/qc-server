@@ -1,4 +1,8 @@
-"""Admin panel: create users -- reviewers, editors or both -- hand out API keys and watch the queue.
+"""Admin panel: users and their keys, the queue, and the approval of subjects into the dataset.
+
+Reviewers' and editors' verdicts wait in the server's state folder. The administrator
+approves a subject whose labels are all accepted, which writes it into the dataset, or sends
+it back to the reviewers or the editors, or closes it without writing anything.
 
 Authentication is the server's admin key, sent as an ``X-Admin-Key`` header. The panel at
 ``/admin`` is a single static page that asks for the key once and keeps it in the
@@ -139,6 +143,68 @@ def release(assignment_id: str, store: QCStore = Depends(require_admin)) -> dict
 @router.get("/api/submissions")
 def submissions(limit: int = 100, kind: str | None = None, store: QCStore = Depends(require_admin)) -> list[dict]:
     return store.audit.read_recent(limit=limit, kind=kind)
+
+
+@router.get("/api/cases")
+def cases(stage: str | None = None, limit: int = 500, store: QCStore = Depends(require_admin)) -> list[dict]:
+    """The subjects with a verdict on this server, most recently changed first. ``stage`` takes
+    one stage or several, comma-separated: review, edit, approval, escalated, applied, closed."""
+    stages = [s.strip() for s in stage.split(",") if s.strip()] if stage else None
+    return store.cases(stages=stages, limit=limit)
+
+
+@router.post("/api/cases/approve")
+def approve_all(payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
+    """Approve the subjects named in ``subject_keys``, or every subject waiting for approval.
+    One that cannot be approved is reported, and the others go ahead."""
+    keys = (payload or {}).get("subject_keys")
+    if keys is not None and not isinstance(keys, list):
+        raise QCError("subject_keys must be a list of subject keys, such as ['001_000001'].")
+    results = store.approve_all([str(key) for key in keys] if keys is not None else None)
+    return {"approved": sum(1 for r in results if r["approved"]), "results": results}
+
+
+@router.get("/api/cases/{subject_key}")
+def case(subject_key: str, store: QCStore = Depends(require_admin)) -> dict:
+    found = store.case_of(subject_key)
+    if found is None:
+        raise QCError(f"Nobody has given a verdict on subject {subject_key} on this server.", status_code=404)
+    return found.model_dump()
+
+
+@router.get("/api/cases/{subject_key}/segmentation")
+def case_segmentation(subject_key: str, store: QCStore = Depends(require_admin)) -> FileResponse:
+    """The segmentation a subject's verdicts are about, to look at in 3D Slicer before approving:
+    its editor's correction, or the dataset's own."""
+    path = store.case_segmentation_path(subject_key)
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+@router.post("/api/cases/{subject_key}/approve")
+def approve(subject_key: str, store: QCStore = Depends(require_admin)) -> dict:
+    """Write the subject into the dataset: its accepted labels become reviewed (2), and an
+    editor's correction replaces the dataset's segmentation."""
+    outcome = store.approve(subject_key)
+    return {
+        "case": outcome.case.model_dump(),
+        "updated_labels": outcome.updated_labels,
+        "segmentation_written": outcome.segmentation_written,
+        "backup_path": outcome.backup_path,
+        "message": outcome.message,
+    }
+
+
+@router.post("/api/cases/{subject_key}/return")
+def return_case(subject_key: str, payload: dict, store: QCStore = Depends(require_admin)) -> dict:
+    """Send a subject back: ``{"to": "review"}`` has every verdict reviewed again, ``{"to": "edit"}``
+    hands it to the editors with the ``comment``. Reopens a closed subject."""
+    return store.return_case(subject_key, str(payload.get("to", "")), payload.get("comment")).model_dump()
+
+
+@router.post("/api/cases/{subject_key}/close")
+def close_case(subject_key: str, payload: dict | None = None, store: QCStore = Depends(require_admin)) -> dict:
+    """Finish a subject's quality check without writing anything into the dataset."""
+    return store.close_case(subject_key, (payload or {}).get("comment")).model_dump()
 
 
 @router.post("/api/refresh-index")

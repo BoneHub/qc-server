@@ -1,9 +1,11 @@
 // BoneHub Quality Check -- browser review page.
 //
 // Signs in with a reviewer's API key, leases subjects from /api/v1 the way the 3D Slicer
-// extension does, shows them with NiiVue, and sends the verdict back. It cannot edit a
-// segmentation: a confirmation vouches for the stored one as it is
-// (use_stored_segmentation), and corrections are made in 3D Slicer, by an editor.
+// extension does, shows them with NiiVue, and sends the verdict back: each label under review
+// accepted or rejected -- it needs correcting, or should not be there -- and bones the
+// segmentation lacks reported missing. It cannot edit a segmentation: the verdict judges the
+// segmentation as it is (use_stored_segmentation), and what it rejects goes to an editor, in
+// 3D Slicer. Verdicts wait on the server until its administrator approves the subject.
 //
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
@@ -23,6 +25,9 @@ const ROLE = "reviewer";
 
 // Short names for the Subject_info label statuses; the server's full wording is the tooltip.
 const STATUS_SHORT = { 0: "absent", 1: "unreviewed", 2: "reviewed" };
+
+// Why a label is rejected, until the server says it in its own words.
+const REASON_TEXT = { quality: "needs correction", absent: "should not be there", missing: "is missing" };
 
 // CT windows, [min, max] in Hounsfield units.
 const WINDOWS = { bone: [-450, 1050], soft: [-160, 240] };
@@ -57,12 +62,17 @@ const state = {
   key: null,
   info: null, // what /api/v1/ping said about this reviewer
   statusText: {}, // label status -> the server's wording
+  reasonText: { ...REASON_TEXT }, // reason to reject -> the server's wording
+  labelNames: [], // every BoneHub label, to report a missing bone by
   handout: null,
   segments: [], // the handout's segments, in label-value (anatomical) order
   byNumber: new Map(), // segment number -> segment
   hidden: new Set(), // segment numbers the reviewer hid
   solo: null, // segment number shown alone, or null
-  vouched: new Set(), // label names ticked
+  labels: new Map(), // label name -> what the quality check has made of it (the handout's labels)
+  verdicts: new Map(), // label name -> "accept" or "reject", the reviewer's verdict
+  reasons: new Map(), // label name -> why a label in the segmentation is rejected: "quality" or "absent"
+  missing: new Set(), // bones reported missing that the subject does not list
   // image and seg2d are on the slice view, seg3d on the 3D view. segRef is the slice view's
   // mask untouched by hiding; it is on no canvas and answers "which label is here".
   volumes: { image: null, segRef: null, seg2d: null, seg3d: null },
@@ -282,10 +292,14 @@ async function signIn(key, remember) {
   storageRemove("localStorage", KEY_STORAGE);
   storageSet(remember ? "localStorage" : "sessionStorage", KEY_STORAGE, key);
   try {
-    state.statusText = (await api("GET", "/api/v1/labels")).label_status_values || {};
+    const labels = await api("GET", "/api/v1/labels");
+    state.statusText = labels.label_status_values || {};
+    state.reasonText = { ...REASON_TEXT, ...(labels.reject_reasons || {}) };
+    state.labelNames = Object.keys(labels.label_name_to_value || {}).sort();
   } catch (e) {
     state.statusText = {};
   }
+  $("labelNames").replaceChildren(...state.labelNames.map((name) => el("option", { value: name })));
 
   $("login").hidden = true;
   $("app").hidden = false;
@@ -832,8 +846,23 @@ async function openSubject(handout) {
   state.byNumber = new Map(state.segments.map((s) => [s.number, s]));
   state.hidden = new Set();
   state.solo = null;
-  state.vouched = new Set(state.segments.map((s) => s.label));
+  state.labels = new Map((handout.labels || []).map((label) => [label.name, label]));
+  state.verdicts = new Map();
+  state.reasons = new Map();
+  state.missing = new Set();
+  // Every label under review starts accepted, and the reviewer rejects what is wrong -- but a
+  // segmentation that cannot be accepted as it is starts rejected, and one not sent unjudged.
+  for (const label of state.labels.values()) {
+    if (label.state !== "pending") continue;
+    if (label.painted && handout.stored_segmentation_issue) {
+      state.verdicts.set(label.name, "reject");
+      state.reasons.set(label.name, "quality");
+    } else if (!label.painted || handout.has_segmentation) {
+      state.verdicts.set(label.name, "accept");
+    }
+  }
   $("comment").value = "";
+  $("missingInput").value = "";
   $("verdictMessage").replaceChildren();
   $("heldList").hidden = true;
   renderSubject();
@@ -859,6 +888,7 @@ async function openSubject(handout) {
     await buildViews(key, imageBuffer, segBuffer);
     state.loaded = true;
     hideLoading();
+    renderLabels(); // what was seen can now be judged
   } catch (error) {
     clearViewers();
     const text =
@@ -889,9 +919,16 @@ function renderSubject() {
   renderLease();
 
   const notes = [];
+  if (handout.segmentation_source === "staged") {
+    const edit = [...(handout.history || [])].reverse().find((event) => event.action === "edit");
+    notes.push(
+      `This segmentation is an editor's correction${edit ? `, by ${edit.by}` : ""}. It is not in the dataset yet: ` +
+        "the dataset keeps its own until the administrator approves this one.",
+    );
+  }
   if (handout.data_access === "image") {
     notes.push(
-      "Your account is sent images only, so it cannot confirm a segmentation. Report problems with Reject and a comment, or release the subject.",
+      "Your account is sent images only, so it cannot accept a segmentation. Reject the subject with a comment, report missing bones, or release it.",
     );
   } else if (handout.data_access === "segmentation") {
     notes.push("Your account is sent the segmentation only; the slices show the labels without the image.");
@@ -907,13 +944,12 @@ function renderSubject() {
     notes.push("The server could not read which labels this segmentation holds, so it cannot be reviewed here.");
   } else if (handout.stored_segmentation_issue) {
     notes.push(
-      `This segmentation cannot be confirmed as it is. ${handout.stored_segmentation_issue} ` +
-        (isEditor()
-          ? "Correct it in 3D Slicer, or reject it with a comment."
-          : "It needs correcting in 3D Slicer, by an editor: reject it with a comment."),
+      `This segmentation cannot be accepted as it is. ${handout.stored_segmentation_issue} ` +
+        "Its labels start rejected, so that an editor rewrites it on the image's grid in 3D Slicer.",
     );
   }
   $("subjectNotes").replaceChildren(...notes.map((text) => banner(text, "note")));
+  renderHistory();
 }
 
 // Whether this account may also correct segmentations, which is done in 3D Slicer.
@@ -934,30 +970,162 @@ function renderLease() {
 }
 
 // ------------------------------------------------------------------- labels
-function statusOf(label) {
-  const statuses = state.handout.segmentation_labels || {};
-  return label in statuses ? statuses[label] : null;
+// What the quality check has made of a label so far, in words, for its status column.
+function labelStatus(label) {
+  const by = label.by ? ` · ${label.by}` : "";
+  switch (label.state) {
+    case "pending":
+      if (!label.painted) {
+        return {
+          text: `removed · ${label.edited_by}`,
+          title: `${label.edited_by} took it out of the segmentation. Accept if the bone should not be segmented; reject if it is missing.`,
+        };
+      }
+      if (label.edited_by) return { text: `edited · ${label.edited_by}`, title: `Corrected by ${label.edited_by}, in 3D Slicer.` };
+      if (!label.dataset_status) {
+        return { text: "new", title: "Subject_info does not list this label as available, and nobody has reviewed it." };
+      }
+      return { text: STATUS_SHORT[label.dataset_status] || String(label.dataset_status), title: state.statusText[label.dataset_status] || "" };
+    case "accepted":
+      return { text: `accepted${by}`, title: "Accepted already. Reject it if you see a problem." };
+    case "kept":
+      return { text: "reviewed", title: "Reviewed in the dataset already, so not under review. Reject it if you see a problem." };
+    case "removed":
+      return {
+        text: label.by ? `removed · ${label.by}` : "not painted",
+        title: "Not in the segmentation: it becomes not available when the subject is approved. Reject it if the bone is missing.",
+      };
+    case "rejected":
+      return { text: `rejected${by}`, title: state.reasonText[label.reason] || "" };
+    default:
+      return { text: label.state, title: "" };
+  }
 }
 
-// Labels Subject_info lists as available that the segmentation does not paint. Only known when
-// the segmentation itself was sent.
-function absentLabels() {
-  if (!state.handout.has_segmentation || !state.segments.length) return [];
-  const painted = new Set(state.segments.map((s) => s.label));
-  return Object.entries(state.handout.segmentation_labels || {})
-    .filter(([label, status]) => status > 0 && !painted.has(label))
-    .map(([label]) => label);
+// Whether the reviewer can judge a label: one in the segmentation takes seeing it.
+function canJudge(label) {
+  if (!state.handout || !label) return false;
+  if (!label.painted) return true;
+  return !!state.handout.has_segmentation && state.segments.length > 0 && state.loaded;
 }
 
-function canConfirm() {
-  const handout = state.handout;
-  return (
-    !!handout &&
-    handout.has_segmentation &&
-    !handout.stored_segmentation_issue &&
-    state.segments.length > 0 &&
-    state.loaded
+// A segmentation that is not on its image's grid cannot be accepted as it is: an editor rewrites it.
+function canAccept(label) {
+  return canJudge(label) && !(label.painted && state.handout.stored_segmentation_issue);
+}
+
+// The labels under review the reviewer can judge but has not.
+function unjudged() {
+  return [...state.labels.values()]
+    .filter((label) => label.state === "pending" && canJudge(label) && !state.verdicts.has(label.name))
+    .map((label) => label.name);
+}
+
+function setVerdict(name, verdict) {
+  const label = state.labels.get(name);
+  // Pressing the verdict a label has takes it back -- except under review, where one is needed.
+  if (state.verdicts.get(name) === verdict && !(label && label.state === "pending")) state.verdicts.delete(name);
+  else state.verdicts.set(name, verdict);
+  renderLabels();
+  updateVerdictButtons();
+}
+
+function setAll(verdict) {
+  for (const label of state.labels.values()) {
+    if (label.state !== "pending" || !canJudge(label)) continue;
+    if (verdict === "accept" && !canAccept(label)) continue;
+    state.verdicts.set(label.name, verdict);
+  }
+  renderLabels();
+  updateVerdictButtons();
+}
+
+function verdictButtons(label) {
+  const verdict = state.verdicts.get(label.name);
+  const judgeable = canJudge(label);
+  return el(
+    "span",
+    { className: "verdict", role: "group", "aria-label": `Verdict on ${label.name}` },
+    el(
+      "button",
+      {
+        className: "accept",
+        "aria-pressed": String(verdict === "accept"),
+        disabled: !canAccept(label),
+        title: label.painted
+          ? "Accept: the segmentation of this bone is right"
+          : "Accept: the bone is rightly not segmented",
+        onclick: () => setVerdict(label.name, "accept"),
+      },
+      "✓",
+    ),
+    el(
+      "button",
+      {
+        className: "reject",
+        "aria-pressed": String(verdict === "reject"),
+        disabled: !judgeable,
+        title: label.painted
+          ? "Reject: it needs correcting, or should not be there"
+          : "Reject: the bone is in the scan and missing from the segmentation",
+        onclick: () => setVerdict(label.name, "reject"),
+      },
+      "✗",
+    ),
   );
+}
+
+// A label's row, and under a rejected one in the segmentation the reason for rejecting it.
+function labelRows(label, segment) {
+  const status = labelStatus(label);
+  const rejected = state.verdicts.get(label.name) === "reject";
+  const cells = [
+    verdictButtons(label),
+    segment ? el("span", { className: "swatch", style: { background: `rgb(${displayColor(segment).join(",")})` } }) : el("span"),
+    segment
+      ? el("button", { className: "lname", title: "Show where this label is", onclick: () => focusSegment(segment) }, label.name)
+      : el("span", { className: "lname" }, label.name),
+    el("span", { className: `lstatus ${label.state}`, title: status.title }, status.text),
+  ];
+  if (segment) {
+    cells.push(
+      el("button", { className: "icon solo", title: "Show only this label", onclick: () => toggleSolo(segment) }, icon("solo")),
+      el("button", { className: "icon eye", title: "Hide this label", onclick: () => toggleHidden(segment) }, icon("eye")),
+    );
+  }
+  const rows = [
+    el(
+      "div",
+      {
+        className: `lrow${segment ? "" : " absent"}${rejected ? " rejected" : ""}`,
+        dataset: segment ? { number: segment.number } : {},
+        title: segment ? undefined : "Not in the segmentation",
+      },
+      ...cells,
+    ),
+  ];
+  if (rejected && label.painted) {
+    const reason = state.reasons.get(label.name) || "quality";
+    rows.push(
+      el(
+        "div",
+        { className: "lrow" },
+        el("span"),
+        el("span"),
+        el(
+          "select",
+          {
+            className: "lreason",
+            "aria-label": `Why ${label.name} is rejected`,
+            onchange: (event) => state.reasons.set(label.name, event.target.value),
+          },
+          el("option", { value: "quality", selected: reason === "quality" }, "Needs correction"),
+          el("option", { value: "absent", selected: reason === "absent" }, "Should not be there"),
+        ),
+      ),
+    );
+  }
+  return rows;
 }
 
 function renderLabels() {
@@ -966,96 +1134,89 @@ function renderLabels() {
   list.replaceChildren();
   if (!handout) return;
 
-  const tickable = handout.has_segmentation && state.segments.length > 0;
+  // The bones in the segmentation, in anatomical order, then those it does not paint -- every
+  // label, when the segmentation is not sent.
+  const listed = new Set();
   for (const segment of state.segments) {
-    const status = statusOf(segment.label);
-    const statusName = status === null ? "new" : STATUS_SHORT[status] || String(status);
-    const color = `rgb(${displayColor(segment).join(",")})`;
-    list.append(
-      el(
-        "div",
-        { className: "lrow", dataset: { number: segment.number } },
-        el("input", {
-          type: "checkbox",
-          className: "vouch",
-          checked: state.vouched.has(segment.label),
-          disabled: !tickable,
-          "aria-label": `Vouch for ${segment.label}`,
-          title: "Tick the labels you vouch for",
-          onchange: (event) => {
-            if (event.target.checked) state.vouched.add(segment.label);
-            else state.vouched.delete(segment.label);
-            updateVerdictButtons();
-          },
-        }),
-        el("span", { className: "swatch", style: { background: color } }),
-        el(
-          "button",
-          { className: "lname", title: "Show where this label is", onclick: () => focusSegment(segment) },
-          segment.label,
-        ),
-        el(
-          "span",
-          {
-            className: `lstatus ${statusName}`,
-            title: status === null ? "Subject_info does not list this label yet." : state.statusText[status] || "",
-          },
-          statusName,
-        ),
-        el("button", { className: "icon solo", title: "Show only this label", onclick: () => toggleSolo(segment) }, icon("solo")),
-        el("button", { className: "icon eye", title: "Hide this label", onclick: () => toggleHidden(segment) }, icon("eye")),
-      ),
-    );
+    listed.add(segment.label);
+    const label = state.labels.get(segment.label) || { name: segment.label, state: "pending", painted: true };
+    list.append(...labelRows(label, segment));
   }
-
-  const absent = absentLabels();
-  for (const label of absent) {
-    list.append(
-      el(
-        "div",
-        { className: "lrow absent", title: "Listed for this subject, but no voxels carry it." },
-        el("span"),
-        el("span"),
-        el("span", { className: "lname" }, label),
-        el("span", { className: "lstatus" }, "not painted"),
-      ),
-    );
+  for (const label of state.labels.values()) {
+    if (!listed.has(label.name)) list.append(...labelRows(label, null));
   }
+  renderMissing();
 
-  // Without the segmentation there is nothing to tick; what Subject_info says is still worth seeing.
-  if (!handout.has_segmentation) {
-    for (const [label, status] of Object.entries(handout.segmentation_labels || {})) {
-      list.append(
-        el(
-          "div",
-          { className: "lrow absent listed" },
-          el("span"),
-          el("span"),
-          el("span", { className: "lname" }, label),
-          el("span", { className: "lstatus", title: state.statusText[status] || "" }, STATUS_SHORT[status] || String(status)),
-        ),
-      );
-    }
-  }
-
+  const pending = [...state.labels.values()].filter((label) => label.state === "pending");
   const foot = [];
-  if (state.segments.length) {
-    foot.push(`${state.segments.length} label(s) in the segmentation. The ticked ones are marked reviewed when you confirm.`);
-  } else if (!handout.has_segmentation) {
+  if (pending.length) {
+    foot.push(`${pending.length} label(s) under review: accept (✓) or reject (✗) each.`);
+  } else if (state.labels.size) {
+    foot.push("No label is under review; reject one if you see a problem.");
+  }
+  if (!handout.has_segmentation && [...state.labels.values()].some((label) => label.painted)) {
     foot.push(
       handout.data_access === "image"
-        ? "Your account is not sent segmentations; these are the labels Subject_info lists."
-        : "This subject has no segmentation.",
+        ? "Your account is not sent segmentations, so you can reject the subject, or report missing bones, but not accept."
+        : "The segmentation could not be sent.",
     );
   }
-  if (absent.length && state.info && state.info.mark_removed_labels_absent) {
-    foot.push("Labels that are listed but not painted are marked not available when you confirm.");
+  if ([...state.labels.values()].some((label) => !label.painted) && state.info && state.info.mark_removed_labels_absent) {
+    foot.push("A label not in the segmentation becomes not available when the subject is approved, unless reported missing.");
   }
   $("labelsFoot").textContent = foot.join(" ");
-  $("labelsTitle").textContent = state.segments.length ? `Labels (${state.segments.length})` : "Labels";
-  $("tickAllBtn").hidden = !tickable;
-  $("tickNoneBtn").hidden = !tickable;
+  $("labelsTitle").textContent = state.labels.size ? `Labels (${state.labels.size})` : "Labels";
+  const bulk = pending.some(canJudge);
+  $("acceptAllBtn").hidden = !bulk;
+  $("rejectAllBtn").hidden = !bulk;
   updateLabelRows();
+}
+
+function renderMissing() {
+  $("missingBox").hidden = !state.handout;
+  $("missingList").replaceChildren(
+    ...[...state.missing].sort().map((name) =>
+      el(
+        "span",
+        { className: "chip" },
+        `${name} missing`,
+        el(
+          "button",
+          {
+            title: `Take it back: ${name} is not missing`,
+            "aria-label": `Take back ${name}`,
+            onclick: () => {
+              state.missing.delete(name);
+              renderLabels();
+              updateVerdictButtons();
+            },
+          },
+          "×",
+        ),
+      ),
+    ),
+  );
+}
+
+// A bone the segmentation lacks goes to an editor, to add.
+function reportMissing() {
+  const name = $("missingInput").value.trim().toUpperCase();
+  if (!name) return;
+  if (state.labelNames.length && !state.labelNames.includes(name)) {
+    showVerdictMessage(`${name} is not a BoneHub label. Pick one from the list.`, "err");
+    return;
+  }
+  const label = state.labels.get(name);
+  if (label && label.painted) {
+    showVerdictMessage(`${name} is in the segmentation already. Reject it there if it needs correcting.`, "err");
+    return;
+  }
+  if (label) state.verdicts.set(name, "reject"); // listed, not painted: rejected as missing
+  else state.missing.add(name);
+  $("missingInput").value = "";
+  $("verdictMessage").replaceChildren();
+  renderLabels();
+  updateVerdictButtons();
 }
 
 function updateLabelRows() {
@@ -1071,9 +1232,6 @@ function updateLabelRows() {
     const solo = row.querySelector(".solo");
     solo.setAttribute("aria-pressed", String(state.solo === segment.number));
     solo.title = state.solo === segment.number ? "Show every label again" : "Show only this label";
-    const tick = row.querySelector(".vouch");
-    tick.checked = state.vouched.has(segment.label);
-    tick.disabled = !canConfirm();
   }
 }
 
@@ -1096,9 +1254,60 @@ function showAllLabels() {
   applyLabelColors();
 }
 
+// ------------------------------------------------------------------ history
+// What happened to the subject before it reached this reviewer, oldest first.
+function renderHistory() {
+  const events = (state.handout && state.handout.history) || [];
+  const list = $("historyList");
+  list.hidden = !events.length;
+  list.replaceChildren(
+    ...events.map((event) =>
+      el(
+        "li",
+        {},
+        el("span", { className: "who" }, `${new Date(event.at).toLocaleDateString()} · ${event.by}: `),
+        describeEvent(event),
+        event.comment ? el("div", {}, `“${event.comment}”`) : null,
+      ),
+    ),
+  );
+}
+
+function describeEvent(event) {
+  const details = event.details || {};
+  const names = (list) => (list || []).join(", ");
+  if (event.action === "review") {
+    const rejected = Object.entries(details.rejected || {}).filter(([, why]) => why !== "missing");
+    const parts = [];
+    if ((details.accepted || []).length) parts.push(`accepted ${names(details.accepted)}`);
+    if (rejected.length) parts.push(`rejected ${rejected.map(([name, why]) => `${name} (${state.reasonText[why] || why})`).join(", ")}`);
+    if ((details.missing || []).length) parts.push(`reported missing ${names(details.missing)}`);
+    return parts.join("; ") || "reviewed it";
+  }
+  if (event.action === "edit") {
+    const parts = [];
+    if ((details.edited || []).length) parts.push(`corrected ${names(details.edited)}`);
+    if ((details.removed || []).length) parts.push(`removed ${names(details.removed)}`);
+    return parts.join("; ") || "uploaded the segmentation unchanged";
+  }
+  if (event.action === "return") return `sent it back to the ${details.to === "edit" ? "editors" : "reviewers"}`;
+  if (event.action === "escalate") return "sent it to the administrator";
+  return event.action;
+}
+
 // ------------------------------------------------------------------ verdict
-function vouchedLabels() {
-  return state.segments.map((s) => s.label).filter((label) => state.vouched.has(label));
+// The verdict as the server takes it: accepted labels, rejected ones with their reasons, and
+// bones reported missing that the subject does not list.
+function verdictToSend() {
+  const accepted = [];
+  const rejected = {};
+  for (const [name, verdict] of state.verdicts) {
+    const label = state.labels.get(name) || { name, painted: true };
+    if (!canJudge(label)) continue;
+    if (verdict === "accept") accepted.push(name);
+    else rejected[name] = label.painted ? state.reasons.get(name) || "quality" : "missing";
+  }
+  return { accepted: accepted.sort(), rejected, missing: [...state.missing].sort() };
 }
 
 function setBusy(busy) {
@@ -1109,67 +1318,92 @@ function setBusy(busy) {
 
 function updateVerdictButtons() {
   const holding = !!state.handout;
-  const count = vouchedLabels().length;
+  const { accepted, rejected, missing } = holding ? verdictToSend() : { accepted: [], rejected: {}, missing: [] };
+  const toEditors = Object.keys(rejected).length + missing.length;
+  const open = holding ? unjudged() : [];
+  const underReview = [...state.labels.values()].some((label) => label.state === "pending");
+  const ready =
+    holding && state.loaded && !open.length && (accepted.length > 0 || toEditors > 0 || !underReview);
+
   const confirm = $("confirmBtn");
-  confirm.textContent = canConfirm() && count ? `Confirm ${count} label${count === 1 ? "" : "s"}` : "Confirm";
-  confirm.disabled = state.busy || !canConfirm() || !count;
-  confirm.title = !canConfirm()
-    ? state.handout && state.handout.stored_segmentation_issue
-      ? "This segmentation cannot be confirmed as it is; see the note under Subject."
-      : "There is no segmentation shown here to confirm."
-    : count
-      ? "The ticked labels are marked reviewed; the segmentation stays as it is."
-      : "Tick the labels you vouch for first.";
+  confirm.textContent = toEditors
+    ? `Send to editors (${toEditors})`
+    : accepted.length
+      ? `Accept ${accepted.length} label${accepted.length === 1 ? "" : "s"}`
+      : "Submit verdict";
+  confirm.disabled = state.busy || !ready;
+  confirm.title = !holding
+    ? ""
+    : open.length
+      ? `Give every label under review a verdict first: ${open.join(", ")}.`
+      : toEditors
+        ? "The rejected labels go to the editors, to correct in 3D Slicer."
+        : "The subject waits for the administrator's approval.";
   $("rejectBtn").disabled = state.busy || !holding;
   $("releaseBtn").disabled = state.busy || !holding;
   $("extendBtn").disabled = state.busy || !holding;
-  for (const tick of document.querySelectorAll("#labelsList .vouch")) tick.disabled = !canConfirm();
+  $("acceptAllBtn").disabled = state.busy || !holding;
+  $("rejectAllBtn").disabled = state.busy || !holding;
+  $("missingAddBtn").disabled = state.busy || !holding;
 }
 
 function showVerdictMessage(text, kind) {
   $("verdictMessage").replaceChildren(banner(text, kind));
 }
 
-async function onConfirm() {
+async function onSubmit() {
   const handout = state.handout;
-  const confirmed = vouchedLabels();
-  if (!confirmed.length) {
-    showVerdictMessage("Tick at least one label you vouch for, or reject the subject instead.", "err");
+  const open = unjudged();
+  if (open.length) {
+    showVerdictMessage(`Give every label under review a verdict first: ${open.join(", ")}.`, "err");
     return;
   }
-  const notTicked = state.segments.map((s) => s.label).filter((label) => !state.vouched.has(label));
-  const absent = state.info && state.info.mark_removed_labels_absent ? absentLabels() : [];
-  const body = [
+  const { accepted, rejected, missing } = verdictToSend();
+  const toCorrect = Object.entries(rejected).filter(([, why]) => why !== "missing");
+  const toAdd = [...Object.keys(rejected).filter((name) => rejected[name] === "missing"), ...missing].sort();
+  const toEditors = toCorrect.length + toAdd.length > 0;
+  const leftOver = [...state.labels.values()].some(
+    (label) => label.state === "pending" && !state.verdicts.has(label.name),
+  );
+
+  const body = [];
+  if (accepted.length) {
+    body.push(el("p", {}, `${accepted.length} label(s) `, el("strong", {}, "accepted"), "."));
+  }
+  if (toCorrect.length) {
+    body.push(
+      el("p", {}, "Rejected, for an editor to correct:"),
+      el("ul", {}, toCorrect.map(([name, why]) => el("li", {}, `${name}: ${state.reasonText[why] || why}`))),
+    );
+  }
+  if (toAdd.length) {
+    body.push(el("p", {}, "Reported missing, for an editor to add:"), el("ul", {}, toAdd.map((name) => el("li", {}, name))));
+  }
+  body.push(
     el(
       "p",
       {},
-      `${confirmed.length} label(s) will be marked `,
-      el("strong", {}, "reviewed"),
-      " (status 2). The segmentation itself stays exactly as it is.",
+      toEditors
+        ? "The subject goes to the editors; the labels you accepted wait for their correction."
+        : leftOver
+          ? "The labels you could not judge wait for another reviewer."
+          : "The subject then waits for the administrator's approval.",
     ),
-  ];
-  if (notTicked.length) {
-    body.push(el("p", {}, "In the segmentation but not ticked, so left as they are:"), el("ul", {}, notTicked.map((l) => el("li", {}, l))));
-  }
-  if (absent.length) {
-    body.push(
-      el("p", {}, "Listed for this subject but not painted, so they will be marked not available (status 0):"),
-      el("ul", {}, absent.map((l) => el("li", {}, l))),
-    );
-  }
+    el("p", { className: "muted" }, "Nothing is written into the dataset until the administrator approves the subject."),
+  );
   if (state.sliceSpacing) {
     body.push(el("p", {}, `Your comment will note that you saw the scan at ${formatSpacing(1)}.`));
   }
-  if (!(await ask(`Confirm ${handout.subject_key}?`, body, "Confirm"))) return;
-  await submitVerdict(
-    {
-      quality_check_confirmed: true,
-      use_stored_segmentation: true,
-      confirmed_labels: confirmed,
-      comment: commentToSend(),
-    },
-    "Confirming…",
-  );
+  if (!(await ask(`Submit your verdict on ${handout.subject_key}?`, body, toEditors ? "Send to editors" : "Submit"))) return;
+  const metadata = {
+    quality_check_confirmed: true,
+    use_stored_segmentation: true,
+    confirmed_labels: accepted,
+    comment: commentToSend(),
+  };
+  if (Object.keys(rejected).length) metadata.rejected_labels = rejected;
+  if (missing.length) metadata.missing_labels = missing;
+  await submitVerdict(metadata, "Submitting…");
 }
 
 async function onReject() {
@@ -1190,7 +1424,10 @@ async function onReject() {
   } else if (
     !(await ask(
       `Reject ${handout.subject_key}?`,
-      [el("p", {}, "Nothing in the dataset changes; the audit trail records your verdict and comment.")],
+      [
+        el("p", {}, "Every label under review goes to the editors, with your comment."),
+        el("p", { className: "muted" }, "Nothing in the dataset changes."),
+      ],
       "Reject",
       { danger: true },
     ))
@@ -1257,6 +1494,10 @@ async function finishSubject(message) {
   state.handout = null;
   state.segments = [];
   state.byNumber = new Map();
+  state.labels = new Map();
+  state.verdicts = new Map();
+  state.reasons = new Map();
+  state.missing = new Set();
   renderSubject();
   renderLabels();
   updateToolbar();
@@ -1285,19 +1526,15 @@ function wire() {
   $("signOutBtn").addEventListener("click", signOut);
 
   $("nextBtn").addEventListener("click", nextSubject);
-  $("confirmBtn").addEventListener("click", onConfirm);
+  $("confirmBtn").addEventListener("click", onSubmit);
   $("rejectBtn").addEventListener("click", onReject);
   $("releaseBtn").addEventListener("click", onRelease);
   $("extendBtn").addEventListener("click", onExtend);
-  $("tickAllBtn").addEventListener("click", () => {
-    state.vouched = new Set(state.segments.map((s) => s.label));
-    updateLabelRows();
-    updateVerdictButtons();
-  });
-  $("tickNoneBtn").addEventListener("click", () => {
-    state.vouched.clear();
-    updateLabelRows();
-    updateVerdictButtons();
+  $("acceptAllBtn").addEventListener("click", () => setAll("accept"));
+  $("rejectAllBtn").addEventListener("click", () => setAll("reject"));
+  $("missingAddBtn").addEventListener("click", reportMissing);
+  $("missingInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") reportMissing();
   });
 
   $("autoNext").checked = !!prefs.autoNext;

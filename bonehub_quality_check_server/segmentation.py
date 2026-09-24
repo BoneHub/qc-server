@@ -1,11 +1,12 @@
-"""Reading an uploaded segmentation, writing it into the dataset, and describing a stored one.
+"""Reading an uploaded segmentation, writing it in canonical form, and describing a stored one.
 
 The dataset keeps its masks in BoneHub's segmentation format (``.seg.nrrd``, see
 ``bonehub_data_schema/segmentation_file.py``): voxels hold per-file segment numbers, and the
 header maps each number to a ``BoneLabelMap`` value. An upload is read by the same rules as
 the schema's ``read_segmentation`` -- a segment's ``BoneHubValue`` tag, else its name -- and
-is then written back through ``write_indexed_segmentation``, so what lands in the dataset is
-always the canonical form, whichever client wrote the upload.
+is then written back through ``write_indexed_segmentation``, so what waits for approval, and
+later lands in the dataset, is always the canonical form, whichever client wrote the upload.
+:func:`changed_labels` tells which labels an upload changed, voxel by voxel.
 
 A client that only displays a mask, such as the browser review page, is sent the header's
 segment table instead (:func:`read_segment_table`): which number is which label, and the
@@ -165,6 +166,60 @@ def read_segmentation_upload(path: Path, image_path: Path | None = None) -> Uplo
         image.SetSpacing(reference.GetSpacing())
         image.SetDirection(reference.GetDirection())
     return UploadedSegmentation(image=image, value_of_number={n: value_of_number[n] for n in painted})
+
+
+def changed_labels(base_path: Path, upload: UploadedSegmentation) -> set[str] | None:
+    """The labels whose voxels differ between a segmentation file and an upload.
+
+    The two are compared label by label rather than number by number, since they may number
+    their segments differently. A label changed when any voxel gained or lost it, which also
+    covers a label added or taken away. None when the two cannot be compared voxel by voxel --
+    they are on grids of different sizes, or the file cannot be read -- so that every label
+    must be taken as changed.
+    """
+    reader = sitk.ImageFileReader()
+    reader.SetImageIO("NrrdImageIO")
+    reader.SetFileName(str(base_path))
+    try:
+        reader.ReadImageInformation()
+        if reader.GetNumberOfComponents() != 1 or tuple(reader.GetSize()) != tuple(upload.image.GetSize()):
+            return None
+        base_values = _segment_values(reader)
+        base_image = reader.Execute()
+    except (RuntimeError, SegmentationError):
+        return None
+
+    base = sitk.GetArrayViewFromImage(base_image)
+    new = sitk.GetArrayViewFromImage(upload.image)
+    if base.dtype.kind not in "iu" or not base.size:
+        return None
+    top = int(base.max())
+    if top > MAX_SEGMENT_NUMBER or int(base.min()) < 0:
+        return None
+
+    # Both files' numbers are looked up as indices into one list of label values; 0 stays
+    # background, and a number the base's header does not describe gets an index of its own.
+    values = sorted(set(base_values.values()) | set(upload.value_of_number.values()))
+    index_of = {value: index for index, value in enumerate(values, start=1)}
+    undescribed = len(values) + 1
+    base_lookup = np.full(top + 1, undescribed, dtype=np.uint16)
+    base_lookup[0] = 0
+    for number, value in base_values.items():
+        if number <= top:
+            base_lookup[number] = index_of[value]
+    new_lookup = np.zeros(max(upload.value_of_number, default=0) + 1, dtype=np.uint16)
+    for number, value in upload.value_of_number.items():
+        new_lookup[number] = index_of[value]
+
+    changed: set[int] = set()
+    for start in range(0, base.shape[0], _CHUNK_SLICES):
+        chunk = slice(start, start + _CHUNK_SLICES)
+        before, after = base_lookup[base[chunk]], new_lookup[new[chunk]]
+        differ = before != after
+        if differ.any():
+            changed.update(int(index) for index in np.unique(before[differ]))
+            changed.update(int(index) for index in np.unique(after[differ]))
+    return {_LABEL_NAMES[values[index - 1]] for index in changed if 1 <= index <= len(values)}
 
 
 def write_segmentation(upload: UploadedSegmentation, output_path: Path) -> list[str]:

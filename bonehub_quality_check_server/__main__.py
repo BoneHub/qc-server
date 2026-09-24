@@ -157,14 +157,14 @@ def main(argv: list[str] | None = None) -> int:
             print("No users yet.")
             return 0
         print(
-            f"{'name':<24}{'key':<16}{'active':<8}{'roles':<17}{'open':<6}{'confirmed':<11}{'rejected':<10}"
+            f"{'name':<24}{'key':<16}{'active':<8}{'roles':<17}{'open':<6}{'reviewed':<10}{'edited':<8}"
             f"{'receives':<24}datasets"
         )
         for user in users:
             datasets = "all" if user["allowed_dataset_ids"] is None else ",".join(map(str, user["allowed_dataset_ids"]))
             print(
                 f"{user['name']:<24}{user['key_prefix']:<16}{str(user['active']):<8}{','.join(user['roles']):<17}"
-                f"{user['open']:<6}{user['confirmed']:<11}{user['rejected']:<10}{user['data_access']:<24}{datasets}"
+                f"{user['open']:<6}{user['reviewed']:<10}{user['edited']:<8}{user['data_access']:<24}{datasets}"
             )
         return 0
 

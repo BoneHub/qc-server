@@ -11,6 +11,7 @@ import os
 import unittest
 
 from bonehub_quality_check_server import auth
+from bonehub_quality_check_server.models import REVIEWER
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase
@@ -157,7 +158,7 @@ class UserAccountTests(QCTestCase):
     def test_deleting_a_user_revokes_the_key_and_frees_their_subject(self):
         _, api_key = self.store.create_user("alice")
         user = self.store.authenticate(api_key)
-        assignment = self.store.next_subject(user)
+        assignment = self.store.next_subject(user, REVIEWER)
 
         self.store.delete_user("alice")
         with self.assertRaises(QCError):
@@ -209,7 +210,7 @@ class UserAccountTests(QCTestCase):
         listed = self.store.list_users()
         self.assertEqual([u["name"] for u in listed], ["alice", "bob"])
         for entry in listed:
-            self.assertEqual((entry["open"], entry["confirmed"], entry["rejected"]), (0, 0, 0))
+            self.assertEqual((entry["open"], entry["reviewed"], entry["edited"]), (0, 0, 0))
             self.assertNotIn("key_hash", entry)
 
     def test_changing_the_private_key_invalidates_every_issued_key(self):

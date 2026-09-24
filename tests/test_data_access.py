@@ -10,12 +10,11 @@ from __future__ import annotations
 
 import contextlib
 import io
-import json
 import unittest
 
 from bonehub_quality_check_server.__main__ import main
 from bonehub_quality_check_server.config import QCServerConfig
-from bonehub_quality_check_server.models import User
+from bonehub_quality_check_server.models import EDITOR, REVIEWER, User
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase
@@ -66,15 +65,6 @@ class AccountTests(QCTestCase):
         with self.assertRaises(QCError):
             self.store.update_user("alice", data_access="all of it")
         self.assertEqual(self.store._require_user("alice").data_access, "image")
-
-    def test_accounts_written_before_the_setting_existed_still_load(self):
-        """A users.json from an earlier server version has no data_access field."""
-        self.store.create_user("alice")
-        entries = json.loads(self.store.users_path.read_text(encoding="utf-8"))
-        for entry in entries:
-            entry.pop("data_access")
-        self.store.users_path.write_text(json.dumps(entries), encoding="utf-8")
-        self.assertEqual(self.make_store()._require_user("alice").data_access, "image_and_segmentation")
 
     def test_the_setting_is_in_the_public_view_of_a_user(self):
         user, _ = self.store.create_user("alice", data_access="segmentation")
@@ -146,7 +136,7 @@ class HandoutAndDownloadTests(ApiTestCase):
 
 
 class QueueTests(QCTestCase):
-    def test_a_reviewer_sent_the_segmentation_only_skips_subjects_without_one(self):
+    def test_a_user_sent_the_segmentation_only_skips_subjects_without_one(self):
         """They would have nothing at all to look at."""
         self.builder.add_subject(1, 1, segmentation=None)
         self.builder.add_subject(1, 2, segmentation={"FEMUR_LEFT": 1})
@@ -154,16 +144,17 @@ class QueueTests(QCTestCase):
         sam, _ = store.create_user("sam", data_access="segmentation")
         alice, _ = store.create_user("alice")
 
-        self.assertEqual(store.next_subject(sam).subject_id, 2)
-        self.assertEqual(store.next_subject(alice).subject_id, 1)
+        self.assertEqual(store.next_subject(sam, REVIEWER).subject_id, 2)
+        self.assertEqual(store.next_subject(alice, EDITOR).subject_id, 1)
 
     def test_with_only_such_subjects_left_the_queue_is_empty_for_them(self):
         self.builder.add_subject(1, 1, segmentation=None)
         store = self.make_store(QCServerConfig(include_subjects_without_segmentation=True))
         sam, _ = store.create_user("sam", data_access="segmentation")
-        with self.assertRaises(QCError) as ctx:
-            store.next_subject(sam)
-        self.assertEqual(ctx.exception.status_code, 404)
+        for role in (REVIEWER, EDITOR):
+            with self.assertRaises(QCError) as ctx:
+                store.next_subject(sam, role)
+            self.assertEqual(ctx.exception.status_code, 404, role)
 
 
 class AdminPanelTests(ApiTestCase):

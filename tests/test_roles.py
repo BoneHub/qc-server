@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import contextlib
 import io
-import json
 import logging
 import unittest
 
@@ -29,7 +28,7 @@ from bonehub_quality_check_server.models import EDITOR, REVIEWER, ROLES
 from bonehub_quality_check_server.review import STATIC_DIR
 from bonehub_quality_check_server.store import QCError
 
-from tests.support import QCTestCase
+from tests.support import QCTestCase, labels_in_mask
 from tests.test_api import ApiTestCase
 from tests.test_client import LiveServerTestCase
 
@@ -88,15 +87,6 @@ class AccountTests(QCTestCase):
             with self.assertRaises(QCError):
                 self.store.update_user("alice", roles=roles)
         self.assertEqual(self.make_store()._require_user("alice").roles, [REVIEWER])
-
-    def test_accounts_written_before_roles_existed_keep_both(self):
-        """A users.json from server 0.2 records no roles, and its users could use both clients."""
-        self.store.create_user("alice")
-        entries = json.loads(self.store.users_path.read_text(encoding="utf-8"))
-        for entry in entries:
-            entry.pop("roles")
-        self.store.users_path.write_text(json.dumps(entries), encoding="utf-8")
-        self.assertEqual(self.make_store()._require_user("alice").roles, BOTH)
 
     def test_the_roles_are_in_the_public_view_and_the_audit_trail(self):
         user, _ = self.store.create_user("alice", roles=[EDITOR])
@@ -167,12 +157,10 @@ class ClientRoleTests(ApiTestCase):
         self.assertEqual(self.submit(self.reviewer_key, handout["assignment_id"], False, role=EDITOR).status_code, 403)
         self.assertEqual(self.store.get_assignment(handout["assignment_id"]).state, "assigned", "nothing happened")
 
-    def test_a_client_that_does_not_name_its_role_is_told_to_update(self):
-        """An extension from before roles, for instance."""
+    def test_a_client_that_does_not_name_its_role_is_refused(self):
         response = self.client.get("/api/v1/ping", headers={"X-API-Key": self.alice_key})
         self.assertEqual(response.status_code, 400)
         self.assertIn("X-Client-Role", response.json()["detail"])
-        self.assertIn("update it", response.json()["detail"])
 
     def test_an_unknown_role_is_refused(self):
         response = self.ping(self.alice_key, "admin")
@@ -185,77 +173,87 @@ class ClientRoleTests(ApiTestCase):
         self.assertEqual(self.ping("bhqc_wrong", REVIEWER).status_code, 401)
 
     def test_a_role_taken_away_applies_at_once(self):
-        """alice holds a subject in 3D Slicer when the admin makes her a reviewer only."""
-        handout = self.next_subject(self.alice_key, EDITOR)
-        self.client.patch("/admin/api/users/alice", json={"roles": [REVIEWER]}, headers=self.admin_headers)
+        """alice holds a subject on the review page when the admin makes her an editor only."""
+        handout = self.next_subject(self.alice_key, REVIEWER)
+        self.client.patch("/admin/api/users/alice", json={"roles": [EDITOR]}, headers=self.admin_headers)
 
-        refused = self.client.get(handout["image_url"], headers=self.headers(self.alice_key, EDITOR))
+        refused = self.client.get(handout["image_url"], headers=self.headers(self.alice_key, REVIEWER))
         self.assertEqual(refused.status_code, 403)
-        held = self.client.get("/api/v1/assignments", headers=self.headers(self.alice_key, REVIEWER)).json()
-        self.assertEqual([a["assignment_id"] for a in held], [handout["assignment_id"]], "the review page sees it")
+        held = self.client.get("/api/v1/assignments", headers=self.headers(self.alice_key, EDITOR)).json()
+        self.assertEqual(held, [], "3D Slicer lists what it was handed, and this was handed for review")
+        released = self.client.post(
+            f"/admin/api/assignments/{handout['assignment_id']}/release", headers=self.admin_headers
+        )
+        self.assertEqual(released.json()["state"], "released", "the administrator takes it back")
 
 
 class VerdictTests(QCTestCase):
-    """How each role may confirm, checked against the account whatever client a request names."""
+    """How each role may give a verdict, checked against the account whatever client a request names."""
 
     def setUp(self) -> None:
         super().setUp()
         for subject_id in (1, 2):
             self.builder.add_subject(1, subject_id, segmentation={"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
         self.store = self.make_store()
-        self.before_bytes = self.builder.segmentation_file(1, 1).read_bytes()
+        self.rita = self.store.create_user("rita", roles=[REVIEWER])[0]
+        self.eddie = self.store.create_user("eddie", roles=[EDITOR])[0]
+        self.before = self.dataset_state()
 
-    def lease(self, name: str, roles: list):
-        user = self.store.create_user(name, roles=roles)[0]
-        return user, self.store.next_subject(user, roles[0])
+    def send_to_the_editors(self):
+        """rita rejects the right femur of subject 1, and eddie is handed it."""
+        self.review(self.store, self.rita, rejected={"FEMUR_RIGHT": "quality"})
+        return self.store.next_subject(self.eddie, EDITOR)
 
     def assert_untouched(self):
-        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.before_bytes)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 1, "FEMUR_RIGHT": 1})
+        self.assertEqual(self.dataset_state(), self.before)
 
     def test_a_reviewer_cannot_upload_a_segmentation(self):
-        rita, assignment = self.lease("rita", [REVIEWER])
+        assignment = self.store.next_subject(self.rita, REVIEWER)
         with self.assertRaises(QCError) as ctx:
-            self.store.submit(assignment.assignment_id, rita, True, self.upload_file(["FEMUR_LEFT"]))
+            self.store.submit(assignment.assignment_id, self.rita, True, self.upload_file(["FEMUR_LEFT"]))
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("not an editor", ctx.exception.message)
         self.assert_untouched()
 
-    def test_a_reviewer_confirms_the_stored_segmentation_as_it_is(self):
-        rita, assignment = self.lease("rita", [REVIEWER])
-        self.store.submit(assignment.assignment_id, rita, True, None, use_stored_segmentation=True)
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
-        self.assertEqual(self.builder.segmentation_file(1, 1).read_bytes(), self.before_bytes)
+    def test_a_reviewer_judges_the_stored_segmentation_as_it_is(self):
+        assignment = self.store.next_subject(self.rita, REVIEWER)
+        outcome = self.store.submit(assignment.assignment_id, self.rita, True, None, use_stored_segmentation=True)
+        self.assertEqual(outcome.stage, "approval")
+        self.assert_untouched()
 
-    def test_an_editor_cannot_confirm_the_stored_segmentation_as_it_is(self):
-        eddie, assignment = self.lease("eddie", [EDITOR])
+    def test_an_editor_cannot_judge_the_stored_segmentation_as_it_is(self):
+        assignment = self.send_to_the_editors()
         with self.assertRaises(QCError) as ctx:
-            self.store.submit(assignment.assignment_id, eddie, True, None, use_stored_segmentation=True)
+            self.store.submit(assignment.assignment_id, self.eddie, True, None, use_stored_segmentation=True)
         self.assertEqual(ctx.exception.status_code, 403)
         self.assertIn("not a reviewer", ctx.exception.message)
+        with self.assertRaises(QCError) as ctx:
+            self.store.submit(assignment.assignment_id, self.eddie, True, None, rejected_labels={"FEMUR_LEFT": "quality"})
+        self.assertEqual(ctx.exception.status_code, 403)
         self.assert_untouched()
 
     def test_an_editor_uploads_the_corrected_segmentation(self):
-        eddie, assignment = self.lease("eddie", [EDITOR])
-        outcome = self.store.submit(assignment.assignment_id, eddie, True, self.upload_file(["FEMUR_LEFT", "TIBIA_LEFT"]))
-        self.assertTrue(outcome.assignment.segmentation_written)
-        self.assertEqual(self.builder.labels_in_segmentation(1, 1), {"FEMUR_LEFT", "TIBIA_LEFT"})
-
-    def test_either_role_can_reject(self):
-        for name, roles in (("rita", [REVIEWER]), ("eddie", [EDITOR])):
-            user, assignment = self.lease(name, roles)
-            outcome = self.store.submit(assignment.assignment_id, user, False, None, comment="motion blur")
-            self.assertEqual(outcome.assignment.state, "rejected", name)
+        assignment = self.send_to_the_editors()
+        outcome = self.store.submit(
+            assignment.assignment_id, self.eddie, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"])
+        )
+        self.assertTrue(outcome.segmentation_staged)
+        self.assertEqual(labels_in_mask(self.store.current_segmentation_path(1, 1)), {"FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT"})
         self.assert_untouched()
 
-    def test_a_user_with_both_roles_may_confirm_either_way(self):
+    def test_either_role_can_reject(self):
+        assignment = self.send_to_the_editors()
+        outcome = self.store.submit(assignment.assignment_id, self.eddie, False, None, comment="motion blur")
+        self.assertEqual((outcome.assignment.state, outcome.stage), ("submitted", "escalated"))
+        self.assert_untouched()
+
+    def test_a_user_with_both_roles_may_give_either_verdict_but_not_review_their_own_correction(self):
         alice = self.store.create_user("alice")[0]
-        first = self.store.next_subject(alice, REVIEWER)
-        self.store.submit(first.assignment_id, alice, True, None, use_stored_segmentation=True)
-        second = self.store.next_subject(alice, EDITOR)
-        self.store.submit(second.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
-        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
-        self.assertEqual(self.builder.subject_info(1, 2)["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 0})
+        self.review(self.store, alice, rejected={"FEMUR_RIGHT": "quality"})
+        outcome = self.edit(self.store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        self.assertEqual((outcome.assignment.subject_key, outcome.stage), ("001_000001", "review"))
+        self.assertEqual(self.store.next_subject(alice, REVIEWER).subject_key, "001_000002")
+        self.assert_untouched()
 
 
 class ReviewerUploadOverHttpTests(ApiTestCase):
@@ -293,9 +291,10 @@ class QueueTests(QCTestCase):
         self.assertEqual(self.store.next_subject(self.bob, EDITOR).subject_id, 1)
 
     def test_the_lease_records_the_role_it_was_asked_in(self):
-        self.store.next_subject(self.alice, REVIEWER)
+        assignment = self.store.next_subject(self.alice, REVIEWER)
+        self.assertEqual(assignment.role, REVIEWER)
         self.assertEqual(self.store.audit.read_recent(kind="assigned")[0]["role"], REVIEWER)
-        self.assertIn("to 'alice' as reviewer", self.builder.dataset_log(1).read_text(encoding="utf-8"))
+        self.assertIn("to 'alice' as reviewer", (self.state_dir / "server.log").read_text(encoding="utf-8"))
 
 
 class ReviewPageQueueTests(ApiTestCase):

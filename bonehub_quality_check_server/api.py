@@ -7,17 +7,21 @@ role, or every request is refused: a reviewer connecting from 3D Slicer is point
 review page, and an editor cannot sign in to the review page. The flow a client follows is:
 
 1. ``GET  /api/v1/ping``                          - check the key, its role and the server
-2. ``POST /api/v1/subjects/next``                 - lease the next subject
+2. ``POST /api/v1/subjects/next``                 - lease the next subject for this role
 3. ``GET  /api/v1/assignments/{id}/image``        - download the image
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - download the segmentation, if any
 5. ``POST /api/v1/assignments/{id}/submit``       - send the verdict back
 
-Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. An editor confirms
-by uploading the corrected segmentation; a reviewer, who only looks, confirms with
-``use_stored_segmentation`` instead.
+A reviewer is handed subjects waiting for a review, and judges each label of the segmentation
+as it is: ``use_stored_segmentation``, with labels accepted, rejected, or reported missing. An
+editor is handed the subjects reviewers sent back, and uploads the corrected segmentation.
+Verdicts are kept in the server's state folder; nothing reaches the dataset before the
+administrator approves the subject. The segmentation handed out is the one under review: an
+editor's correction waiting for approval, or the dataset's own.
 
-What a user is sent of a subject follows their account's ``data_access``: a file left out
-is missing from the handout and refused at its download endpoint.
+Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. What a user is sent of
+a subject follows their account's ``data_access``: a file left out is missing from the handout
+and refused at its download endpoint.
 """
 
 from __future__ import annotations
@@ -32,12 +36,14 @@ from fastapi.responses import StreamingResponse
 
 from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
 
-from .config import STATUS_REVIEWED
+from . import __version__
 from .models import (
     DATA_ACCESS_DESCRIPTIONS,
     EDITOR,
+    REJECT_REASONS,
     ROLES,
     Assignment,
+    HandoutLabel,
     HandoutSegment,
     SubjectHandout,
     SubmissionRequest,
@@ -90,13 +96,14 @@ def ping(request: Request, user: User = Depends(get_user), role: str = Depends(c
     return {
         "status": "ok",
         "server": "bonehub-dataset-quality-check-server",
+        "server_version": __version__,
         "schema_version": SCHEMA_VERSION,
         "user": user.name,
         "role": role,
         "roles": user.roles,
         "allowed_dataset_ids": user.allowed_dataset_ids,
         "data_access": user.data_access,
-        "confirmed_label_status": STATUS_REVIEWED,
+        "edits_need_review": store.config.edits_need_review,
         "mark_removed_labels_absent": store.config.mark_removed_labels_absent,
         "lease_ttl_seconds": store.config.lease_ttl_seconds,
         "max_concurrent_assignments": store.config.max_concurrent_assignments_per_user,
@@ -110,7 +117,7 @@ def labels(user: User = Depends(get_user)) -> dict:
         "schema_version": SCHEMA_VERSION,
         "label_name_to_value": LABEL_NAME_TO_VALUE,
         "label_status_values": {str(k): v for k, v in VALID_LABEL_VALUES.items()},
-        "confirmed_label_status": STATUS_REVIEWED,
+        "reject_reasons": REJECT_REASONS,
         "segmentation_suffix": SEGMENTATION_SUFFIX,
     }
 
@@ -121,18 +128,21 @@ def next_subject(
 ) -> SubjectHandout:
     """Lease the next subject for this user, in the role of their client.
 
-    If the user already holds their maximum number of subjects, the oldest open one is
-    returned again instead of an error, so a client that lost its local copy can simply
-    ask for the next subject again. A reviewer is not handed a subject without a
-    segmentation, which only an editor can create.
+    A reviewer is handed a subject waiting for a review, an editor one a reviewer sent back,
+    or one without any segmentation. If the user already holds their maximum number of
+    subjects in this role, the oldest open one is returned again instead of an error, so a
+    client that lost its local copy can simply ask for the next subject again.
     """
     store = get_store(request)
     return _handout(store, store.next_subject(user, role), user)
 
 
 @router.get("/assignments", response_model=list[Assignment])
-def my_assignments(request: Request, user: User = Depends(get_user)) -> list[Assignment]:
-    return get_store(request).open_assignments_of(user.name)
+def my_assignments(
+    request: Request, user: User = Depends(get_user), role: str = Depends(client_role)
+) -> list[Assignment]:
+    """The subjects this user holds in the role of this client."""
+    return get_store(request).open_assignments_of(user.name, role)
 
 
 @router.get("/assignments/{assignment_id}", response_model=SubjectHandout)
@@ -154,12 +164,13 @@ def download_image(assignment_id: str, request: Request, user: User = Depends(ge
 
 @router.get("/assignments/{assignment_id}/segmentation")
 def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_user)) -> StreamingResponse:
-    """The stored segmentation, as the dataset keeps it (``.seg.nrrd``)."""
+    """The segmentation under quality check (``.seg.nrrd``): an editor's correction waiting for
+    approval, or else the dataset's own."""
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
     _require_sent(user, "segmentation", user.receives_segmentation)
-    path = store.segmentation_path(assignment.dataset_id, assignment.subject_id)
-    if not path.exists():
+    path = store.current_segmentation_path(assignment.dataset_id, assignment.subject_id)
+    if path is None:
         raise QCError(f"Subject {assignment.subject_key} has no segmentation yet.", status_code=404)
     return _send_from_share(path, media_type="application/octet-stream")
 
@@ -185,17 +196,21 @@ def submit(
     request: Request,
     metadata: str = Form(..., description="JSON body matching SubmissionRequest"),
     segmentation: UploadFile | None = File(
-        None, description="The reviewed segmentation as .seg.nrrd, on the image's voxel grid; required when confirming"
+        None, description="An editor's corrected segmentation as .seg.nrrd, on the image's voxel grid"
     ),
     user: User = Depends(get_user),
+    role: str = Depends(client_role),
 ) -> SubmissionResult:
-    """Receive a user's verdict.
+    """Receive a user's verdict, in the role the subject was handed out in.
 
-    ``quality_check_confirmed=true`` stores the uploaded segmentation and sets the reviewed
-    labels in ``Subject_info_XXX.json`` to status 2, "available, reviewed and corrected";
-    uploading takes an editor. With ``use_stored_segmentation`` and no file, the stored
-    segmentation is confirmed as it is and left untouched, which takes a reviewer.
-    ``false`` leaves the dataset untouched and only writes the audit trail.
+    A reviewer sends ``use_stored_segmentation`` and no file, with each label under review
+    accepted (``confirmed_labels``) or rejected (``rejected_labels``), and bones the
+    segmentation lacks in ``missing_labels``. An editor uploads the corrected segmentation.
+    ``quality_check_confirmed=false`` rejects the subject: from a reviewer, every label under
+    review goes to the editors; from an editor, the subject goes to the administrator.
+
+    The verdict is kept in the server's state folder. Nothing in the dataset changes until the
+    administrator approves the subject.
     """
     store = get_store(request)
 
@@ -218,9 +233,12 @@ def submit(
             confirmed_labels=payload.confirmed_labels,
             comment=payload.comment,
             use_stored_segmentation=payload.use_stored_segmentation,
+            rejected_labels=payload.rejected_labels,
+            missing_labels=payload.missing_labels,
+            role=role,
         )
     finally:
-        # The dataset receives a rewritten copy, so the upload itself is never kept.
+        # What waits for approval is a rewritten copy, so the upload itself is never kept.
         if tmp_path is not None and tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
@@ -229,10 +247,14 @@ def submit(
         subject_key=outcome.assignment.subject_key,
         quality_check_confirmed=bool(outcome.assignment.quality_check_confirmed),
         state=outcome.assignment.state,
-        segmentation_written=outcome.assignment.segmentation_written,
-        updated_labels=outcome.updated_labels,
+        stage=outcome.stage,
+        segmentation_staged=outcome.segmentation_staged,
+        accepted_labels=outcome.accepted_labels,
+        rejected_labels=outcome.rejected_labels,
+        missing_labels=outcome.missing_labels,
+        edited_labels=outcome.edited_labels,
         removed_labels=outcome.removed_labels,
-        backup_path=outcome.backup_path,
+        pending_labels=outcome.pending_labels,
         message=outcome.message,
     )
 
@@ -243,7 +265,7 @@ def _require_role(user: User, role: str | None, review_page: str) -> None:
     if not role:
         raise QCError(
             f"The client did not say which role it works in: send the '{ROLE_HEADER}' header, 'editor' from "
-            "3D Slicer or 'reviewer' from the review page. A client that does not is out of date; update it.",
+            "3D Slicer or 'reviewer' from the review page.",
             status_code=400,
         )
     if role not in ROLES:
@@ -270,9 +292,11 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
     dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
     subject = store.subject_info(dataset_id, subject_id)
     segmentation_labels = dict(subject.segmentation or {})
+    case = store.handout_case(assignment)
+    current = store.current_segmentation_path(dataset_id, subject_id)
     # Only what this user is sent is offered; the download endpoints refuse the rest.
     has_image = user.receives_image and store.image_path(dataset_id, subject_id).exists()
-    has_segmentation = user.receives_segmentation and store.segmentation_path(dataset_id, subject_id).exists()
+    has_segmentation = user.receives_segmentation and current is not None
     segments = store.segment_table(dataset_id, subject_id) if has_segmentation else []
     issue = store.stored_segmentation_issue(dataset_id, subject_id) if has_segmentation else None
     base = f"/api/v1/assignments/{assignment.assignment_id}"
@@ -282,11 +306,28 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
         subject_id=subject_id,
         subject_key=assignment.subject_key,
         expires_at=assignment.expires_at,
+        role=assignment.role,
+        stage=case.stage,
         data_access=user.data_access,
         has_image=has_image,
         has_segmentation=has_segmentation,
+        segmentation_source=None if current is None else "staged" if case.staged else "dataset",
         segmentation_labels=segmentation_labels,
-        label_values={name: LABEL_NAME_TO_VALUE[name] for name in segmentation_labels if name in LABEL_NAME_TO_VALUE},
+        labels=[
+            HandoutLabel(
+                name=name,
+                value=LABEL_NAME_TO_VALUE.get(name),
+                dataset_status=segmentation_labels.get(name),
+                state=label.state,
+                painted=label.painted,
+                reason=label.reason,
+                by=label.by,
+                edited_by=label.edited_by,
+            )
+            for name, label in case.labels.items()
+        ],
+        requests=case.requests,
+        history=case.events,
         segments=[
             HandoutSegment(
                 number=segment.number,

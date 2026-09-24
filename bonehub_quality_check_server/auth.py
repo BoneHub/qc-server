@@ -29,9 +29,6 @@ SERVER_ID_FILE_NAME = "server_id"
 PRIVATE_KEY_FILE_NAME = "server_private_key"
 ADMIN_KEY_FILE_NAME = "admin_key"
 
-#: Every file a credentials folder may hold. None of them may appear on the share.
-CREDENTIAL_FILE_NAMES = (PRIVATE_KEY_FILE_NAME, ADMIN_KEY_FILE_NAME, "users.json")
-
 ENV_PRIVATE_KEY = "BONEHUB_QC_PRIVATE_KEY"
 ENV_ADMIN_KEY = "BONEHUB_QC_ADMIN_KEY"
 

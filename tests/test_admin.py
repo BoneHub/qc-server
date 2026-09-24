@@ -130,14 +130,13 @@ class AdminUserManagementTests(ApiTestCase):
             self.client.post("/admin/api/users/nobody/rotate-key", headers=self.admin_headers).status_code, 404
         )
 
-    def test_the_user_list_shows_progress_per_reviewer(self):
-        handout = self.next_subject(self.alice_key)
-        self.submit(self.alice_key, handout["assignment_id"], True, ["FEMUR_LEFT"])
+    def test_the_user_list_shows_progress_per_user(self):
+        self.judge(self.alice_key, rejected_labels={"FEMUR_RIGHT": "quality"})
+        self.next_subject(self.bob_key, "editor")
 
-        alice = next(u for u in self.client.get("/admin/api/users", headers=self.admin_headers).json()
-                     if u["name"] == "alice")
-        self.assertEqual(alice["confirmed"], 1)
-        self.assertEqual(alice["open"], 0)
+        listed = {u["name"]: u for u in self.client.get("/admin/api/users", headers=self.admin_headers).json()}
+        self.assertEqual((listed["alice"]["reviewed"], listed["alice"]["edited"], listed["alice"]["open"]), (1, 0, 0))
+        self.assertEqual((listed["bob"]["reviewed"], listed["bob"]["open"]), (0, 1))
 
 
 class AdminMonitoringTests(ApiTestCase):
@@ -155,8 +154,8 @@ class AdminMonitoringTests(ApiTestCase):
 
         everything = self.client.get("/admin/api/assignments", headers=self.admin_headers).json()
         self.assertEqual(len(everything), 2)
-        rejected = self.client.get("/admin/api/assignments?state=rejected", headers=self.admin_headers).json()
-        self.assertEqual([a["user"] for a in rejected], ["alice"])
+        submitted = self.client.get("/admin/api/assignments?state=submitted", headers=self.admin_headers).json()
+        self.assertEqual([(a["user"], a["role"], a["stage_after"]) for a in submitted], [("alice", "reviewer", "edit")])
 
     def test_an_administrator_can_take_a_subject_back_from_a_reviewer(self):
         handout = self.next_subject(self.alice_key)
@@ -167,8 +166,7 @@ class AdminMonitoringTests(ApiTestCase):
         self.assertEqual(self.next_subject(self.bob_key)["subject_key"], handout["subject_key"])
 
     def test_submissions_are_readable_from_the_panel(self):
-        handout = self.next_subject(self.alice_key)
-        self.submit(self.alice_key, handout["assignment_id"], True, ["FEMUR_LEFT"], comment="clean")
+        self.judge(self.alice_key, comment="clean")
 
         entries = self.client.get("/admin/api/submissions?kind=submission", headers=self.admin_headers).json()
         self.assertEqual(len(entries), 1)
@@ -183,13 +181,13 @@ class AdminMonitoringTests(ApiTestCase):
 
 class AdminConfigTests(ApiTestCase):
     def test_the_policy_can_be_read_and_changed(self):
-        self.assertEqual(self.client.get("/admin/api/config", headers=self.admin_headers).json()["requeue_rejected"],
-                         False)
+        self.assertTrue(self.client.get("/admin/api/config", headers=self.admin_headers).json()["edits_need_review"])
         body = self.client.put(
-            "/admin/api/config", json={"requeue_rejected": True, "lease_ttl_seconds": 120}, headers=self.admin_headers
+            "/admin/api/config", json={"edits_need_review": False, "lease_ttl_seconds": 120}, headers=self.admin_headers
         ).json()
-        self.assertTrue(body["requeue_rejected"])
+        self.assertFalse(body["edits_need_review"])
         self.assertEqual(body["lease_ttl_seconds"], 120)
+        self.assertFalse(self.store.config.edits_need_review, "the running server follows it at once")
 
     def test_a_policy_change_is_persisted_for_the_next_start(self):
         self.client.put("/admin/api/config", json={"lease_ttl_seconds": 300}, headers=self.admin_headers)
@@ -225,11 +223,6 @@ class AdminConfigTests(ApiTestCase):
                 "/admin/api/config", json={"eligible_label_values": statuses}, headers=self.admin_headers
             )
             self.assertEqual(response.status_code, 400, statuses)
-
-    def test_the_retired_confirmed_value_setting_is_refused(self):
-        """Confirmed labels are always status 2, so there is nothing left to set."""
-        response = self.client.put("/admin/api/config", json={"confirmed_label_value": 2}, headers=self.admin_headers)
-        self.assertEqual(response.status_code, 400)
 
 
 if __name__ == "__main__":

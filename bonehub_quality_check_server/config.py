@@ -5,13 +5,12 @@ Two places, on purpose:
 * the credentials folder, inside the container (``BONEHUB_QC_CREDENTIALS_DIR``): the
   server's id, private key, admin key and user accounts. Never on the dataset share.
 * ``<dataset_root>/<state_dir_name>/<server_id>/`` on the share: this server's policy
-  (``config.json``), assignments, logs and backups. One folder per server, so servers with
+  (``config.json``), assignments, the verdicts and corrected segmentations waiting for the
+  administrator's approval, logs and backups. One folder per server, so servers with
   different admins working on one dataset do not overwrite each other.
 
 Any config field can be overridden at startup through an environment variable named
-``BONEHUB_QC_<FIELD>``, which is how the Docker image is configured. ``config.json``
-records the ``bonehub_data_schema`` version it was written under, because label statuses
-are part of the policy and their meaning can change between schema versions.
+``BONEHUB_QC_<FIELD>``, which is how the Docker image is configured.
 """
 
 from __future__ import annotations
@@ -19,18 +18,17 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from bonehub_data_schema import VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION, is_compatible_schema_version
+from bonehub_data_schema import VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
 
 ENV_PREFIX = "BONEHUB_QC_"
 DEFAULT_STATE_DIR_NAME = ".bonehub_qc"
 #: Inside the container; the Docker image and docker-compose.yml mount a volume here.
 DEFAULT_CREDENTIALS_DIR = "/var/lib/bonehub-qc"
 CONFIG_FILE_NAME = "config.json"
-SCHEMA_VERSION_KEY = "schema_version"
 
 #: The schema whose label statuses and segmentation format this server implements. The
 #: schema is installed from its repository's main branch, so a newer one must stop the
@@ -71,10 +69,6 @@ class QCServerConfig(BaseModel):
             "in 3D Slicer. Reviewers are not handed them."
         ),
     )
-    requeue_rejected: bool = Field(
-        False,
-        description="Hand a subject out again after a user submitted it with quality_check_confirmed=false.",
-    )
     allowed_dataset_ids: list[int] | None = Field(
         None,
         description="Restrict the whole server to these dataset ids. None means every dataset under the root.",
@@ -102,11 +96,18 @@ class QCServerConfig(BaseModel):
     )
 
     # --- submission policy --------------------------------------------------
+    edits_need_review: bool = Field(
+        True,
+        description=(
+            "Send the labels an editor corrected back to the reviewers. Off, the corrected labels the editor "
+            "vouches for are accepted as they are and wait for the administrator's approval."
+        ),
+    )
     mark_removed_labels_absent: bool = Field(
         True,
         description=(
-            "When a confirmed submission no longer contains a label that used to be in the "
-            "segmentation, set that label to 0 ('not available') instead of leaving it."
+            "When an approved subject's segmentation no longer contains a label that used to be in it, "
+            "set that label to 0 ('not available') instead of leaving it."
         ),
     )
     require_geometry_match: bool = Field(
@@ -115,7 +116,7 @@ class QCServerConfig(BaseModel):
     )
     keep_segmentation_backups: bool = Field(
         True,
-        description="Copy the previous segmentation into this server's folder before overwriting it.",
+        description="Copy the dataset's segmentation into this server's folder before an approval overwrites it.",
     )
     max_upload_bytes: int = Field(
         512 * 1024 * 1024,
@@ -141,17 +142,12 @@ class QCServerConfig(BaseModel):
 
     # --- persistence --------------------------------------------------------
     @classmethod
-    def load(cls, config_path: Path, notify: Callable[[str], None] | None = None) -> "QCServerConfig":
-        """Read the config file if it exists, then apply ``BONEHUB_QC_*`` overrides.
-
-        A file written under another schema version has its label statuses reset, see
-        :func:`_upgrade`; ``notify`` receives a line for each change.
-        """
+    def load(cls, config_path: Path) -> "QCServerConfig":
+        """Read the config file if it exists, then apply ``BONEHUB_QC_*`` overrides."""
         data: dict = {}
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            data = _upgrade(data, notify or (lambda message: None))
         data.update(cls._env_overrides())
         return cls(**data)
 
@@ -159,7 +155,7 @@ class QCServerConfig(BaseModel):
         config_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = config_path.with_name(config_path.name + ".tmp")
         with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump({SCHEMA_VERSION_KEY: SCHEMA_VERSION, **self.model_dump()}, f, indent=4)
+            json.dump(self.model_dump(), f, indent=4)
         os.replace(tmp_path, config_path)
 
     @classmethod
@@ -172,26 +168,6 @@ class QCServerConfig(BaseModel):
                 continue
             overrides[name] = _parse_env_value(raw, field.annotation)
         return overrides
-
-
-def _upgrade(data: dict, notify: Callable[[str], None]) -> dict:
-    """Bring a stored config written under another schema version up to this one.
-
-    Label statuses can mean something else in another schema version, so a file from one
-    -- or a file that records none -- has them reset to the default.
-    """
-    data = dict(data)
-    version = data.pop(SCHEMA_VERSION_KEY, None)
-    if is_compatible_schema_version(version):
-        return data
-
-    if "eligible_label_values" in data:
-        old = data.pop("eligible_label_values")
-        notify(
-            f"config.json was written under schema {version or '(not recorded)'}: eligible_label_values "
-            f"{old} reset to the default, {[STATUS_NOT_REVIEWED]}, of schema {SCHEMA_VERSION}."
-        )
-    return data
 
 
 def _parse_env_value(raw: str, annotation) -> object:

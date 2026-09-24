@@ -11,7 +11,7 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from bonehub_quality_check_server.client import BoneHubQCClient
+from bonehub_quality_check_server.client import REVIEWER, BoneHubQCClient
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase
@@ -28,7 +28,7 @@ class ConcurrentHandoutTests(QCTestCase):
 
         def grab(user):
             start.wait(timeout=10)
-            return store.next_subject(user).subject_key
+            return store.next_subject(user, REVIEWER).subject_key
 
         with ThreadPoolExecutor(max_workers=len(users)) as pool:
             keys = list(pool.map(grab, users))
@@ -45,7 +45,7 @@ class ConcurrentHandoutTests(QCTestCase):
         def grab(user):
             start.wait(timeout=10)
             try:
-                return store.next_subject(user).subject_key
+                return store.next_subject(user, REVIEWER).subject_key
             except QCError as exc:
                 return f"refused:{exc.status_code}"
 
@@ -57,28 +57,28 @@ class ConcurrentHandoutTests(QCTestCase):
         self.assertEqual(len(set(handed_out)), 3)
         self.assertTrue(all(r == "refused:404" for r in results if r.startswith("refused")))
 
-    def test_concurrent_submissions_all_land_in_subject_info(self):
-        """Each reviewer writes a different subject in the same Subject_info file."""
+    def test_concurrent_verdicts_all_land_in_the_state_folder(self):
+        """Each reviewer judges a different subject; every verdict is kept, and survives a restart."""
         self.default_dataset(n_subjects=6)
         store = self.make_store()
         users = [store.create_user(f"reviewer_{i}")[0] for i in range(6)]
-        assignments = [store.next_subject(user) for user in users]
-        uploads = [self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]) for _ in users]
+        assignments = [store.next_subject(user, REVIEWER) for user in users]
 
         start = threading.Barrier(len(users))
 
         def send(item):
-            user, assignment, upload = item
+            user, assignment = item
             start.wait(timeout=10)
-            return store.submit(assignment.assignment_id, user, True, upload)
+            return store.submit(assignment.assignment_id, user, True, None, use_stored_segmentation=True)
 
         with ThreadPoolExecutor(max_workers=len(users)) as pool:
-            outcomes = list(pool.map(send, zip(users, assignments, uploads)))
+            outcomes = list(pool.map(send, zip(users, assignments)))
 
-        self.assertTrue(all(o.assignment.state == "confirmed" for o in outcomes))
-        stored = self.builder.all_subject_info(1)
-        self.assertEqual(len(stored), 6, "a concurrent write dropped a subject from the file")
-        for entry in stored:
+        self.assertTrue(all(o.stage == "approval" for o in outcomes))
+        self.assertEqual(len(store.cases(stages=["approval"])), 6)
+        self.assertEqual(len(self.make_store().cases(stages=["approval"])), 6, "a concurrent write lost a verdict")
+        store.approve_all()
+        for entry in self.builder.all_subject_info(1):
             self.assertEqual(entry["segmentation"], {"FEMUR_LEFT": 2, "FEMUR_RIGHT": 2})
 
     def test_concurrent_user_creation_keeps_every_reviewer(self):
@@ -102,7 +102,7 @@ class ConcurrentHandoutTests(QCTestCase):
         self.default_dataset(n_subjects=8)
         store = self.make_store()
         users = [store.create_user(f"reviewer_{i}")[0] for i in range(8)]
-        assignments = [store.next_subject(user) for user in users]
+        assignments = [store.next_subject(user, REVIEWER) for user in users]
         start = threading.Barrier(len(users))
 
         def send(item):
@@ -119,16 +119,17 @@ class ConcurrentHandoutTests(QCTestCase):
 
 
 class BusyServerTests(LiveServerTestCase):
-    """Everyone else is answered while the server works on one user's submission.
+    """Everyone else is answered while the server works on one user's submission, or on an approval.
 
-    Checking and writing the segmentation of a real scan takes seconds. When the submission
-    held up the other requests, the whole server seemed to freeze for everyone until it was done.
+    Checking the segmentation of a real scan, and writing it into the dataset, take seconds.
+    When that held up the other requests, the whole server seemed to freeze for everyone until
+    it was done.
     """
 
     def setUp(self) -> None:
         super().setUp()
         # A short timeout, so that a request stuck behind the submission fails the test quickly.
-        self.bob = BoneHubQCClient(self.base_url, self.bob_key, timeout=5)
+        self.bob = BoneHubQCClient(self.base_url, self.bob_key, timeout=5, role=REVIEWER)
 
     def hold(self, name: str) -> tuple[threading.Event, threading.Event]:
         """Make a call to the store's method ``name`` wait until ``release`` is set.
@@ -146,20 +147,18 @@ class BusyServerTests(LiveServerTestCase):
         setattr(self.store, name, held)
         return entered, release
 
-    def submit_in_background(self, pool: ThreadPoolExecutor):
-        """Alice leases a subject and confirms it with an upload, on another thread."""
-        handout = self.client.next_subject()
+    def accept_in_background(self, pool: ThreadPoolExecutor):
+        """Alice leases a subject on the review page and accepts it, on another thread; accepting
+        checks the whole segmentation file."""
+        handout = self.reviewer.next_subject()
         return pool.submit(
-            self.client.submit,
-            handout["assignment_id"],
-            quality_check_confirmed=True,
-            segmentation_path=self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]),
+            self.reviewer.submit, handout["assignment_id"], quality_check_confirmed=True, use_stored_segmentation=True
         )
 
     def test_others_are_answered_while_a_segmentation_is_checked(self):
         entered, release = self.hold("inspect_segmentation")
         with ThreadPoolExecutor(max_workers=1) as pool:
-            submission = self.submit_in_background(pool)
+            submission = self.accept_in_background(pool)
             try:
                 self.assertTrue(entered.wait(timeout=10), "the submission never reached its check")
                 self.assertEqual(self.bob.ping()["user"], "bob")
@@ -169,17 +168,21 @@ class BusyServerTests(LiveServerTestCase):
                 release.set()
             self.assertTrue(submission.result(timeout=30)["quality_check_confirmed"])
 
-    def test_a_ping_is_answered_while_a_confirmation_writes_the_dataset(self):
-        """Subject_info is rewritten under the store lock, which checking a key does not take."""
+    def test_others_are_answered_while_an_approval_writes_the_dataset(self):
+        """Subject_info is rewritten under the dataset's lock, which neither checking a key nor
+        handing out a subject takes."""
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            self.accept_in_background(pool).result(timeout=30)
         entered, release = self.hold("_mutate_subject_info")
         with ThreadPoolExecutor(max_workers=1) as pool:
-            submission = self.submit_in_background(pool)
+            approval = pool.submit(self.store.approve, "001_000001")
             try:
-                self.assertTrue(entered.wait(timeout=10), "the submission never reached the dataset")
+                self.assertTrue(entered.wait(timeout=10), "the approval never reached the dataset")
                 self.assertEqual(self.bob.ping()["user"], "bob")
+                self.assertEqual(self.bob.next_subject()["subject_key"], "001_000002")
             finally:
                 release.set()
-            self.assertTrue(submission.result(timeout=30)["quality_check_confirmed"])
+            self.assertEqual(approval.result(timeout=30).case.stage, "applied")
 
 
 if __name__ == "__main__":

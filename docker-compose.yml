@@ -19,9 +19,10 @@ services:
     ports:
       - "${BONEHUB_QC_PORT:-8000}:8000"
     volumes:
-      # Mounted read-write: confirmed segmentations, the updated Subject_info files,
-      # the logs and the server's non-secret state are written back into the dataset,
-      # the state in .bonehub_qc/<server id>/.
+      # Mounted read-write: the server keeps its non-secret state -- the verdicts and the
+      # corrected segmentations waiting for approval among it -- in .bonehub_qc/<server id>/,
+      # and writes what the administrator approves into the segmentations, Subject_info
+      # files and quality-check logs of the dataset.
       - "bonehub-dataset:/data"
       # The server's credentials -- its id, private key, admin key and user accounts --
       # stay here, on the Docker host, never on the share. This volume IS the server:
@@ -42,6 +43,8 @@ services:
       BONEHUB_QC_ELIGIBLE_LABEL_VALUES: "${BONEHUB_QC_ELIGIBLE_LABEL_VALUES:-1}"
       BONEHUB_QC_LEASE_TTL_SECONDS: "${BONEHUB_QC_LEASE_TTL_SECONDS:-86400}"
       BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER: "${BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER:-1}"
+      # Whether an editor's corrections go back to a reviewer. Blank leaves it to the admin panel.
+      BONEHUB_QC_EDITS_NEED_REVIEW: "${BONEHUB_QC_EDITS_NEED_REVIEW:-}"
     restart: unless-stopped
 
 volumes:

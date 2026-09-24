@@ -38,9 +38,9 @@ def create_app(
         title="BoneHub Dataset Quality Check",
         version=__version__,
         description=(
-            "Distributes BoneHub subjects to editors, who correct them in 3D Slicer, and to reviewers, "
-            "who check them on the browser review page, and writes confirmed segmentations back into "
-            "the dataset folder."
+            "Distributes BoneHub subjects to reviewers, who judge each label on the browser review page, and "
+            "to editors, who correct the rejected ones in 3D Slicer. Verdicts wait on the server until the "
+            "administrator approves a subject, which writes it into the dataset folder."
         ),
     )
     app.state.store = QCStore(
@@ -94,6 +94,8 @@ def _announce(store: QCStore) -> None:
         f"credentials  : {store.credentials_dir} (inside the container)",
         f"eligible     : {stats.eligible_subjects} of {stats.total_subjects} subjects "
         f"(label statuses {store.config.eligible_label_values})",
+        f"in progress  : {stats.to_review} to review, {stats.to_edit} to edit, "
+        f"{stats.awaiting_approval} awaiting approval, {stats.escalated} escalated",
         f"users        : {len(users)} (reviewers {sum(REVIEWER in u['roles'] for u in users)}, "
         f"editors {sum(EDITOR in u['roles'] for u in users)})",
         f"data schema  : {SCHEMA_VERSION}",
@@ -120,13 +122,6 @@ def _announce(store: QCStore) -> None:
     else:
         lines.append(f"  admin key    : kept inside the container; `{EXEC_CLI} show-admin-key` prints it")
 
-    if store.credentials_on_share:
-        lines += [
-            "",
-            "  WARNING: credentials of an older server are on the dataset share, where they are not safe:",
-            *(f"      {path}" for path in store.credentials_on_share),
-            "  This server does not use them. Delete them from the share.",
-        ]
     print("\n".join(lines), flush=True)
     store.audit.event("Server started. " + " | ".join(details))
 

@@ -20,6 +20,7 @@ from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server import auth
 from bonehub_quality_check_server.app import create_app
 from bonehub_quality_check_server.config import ENV_PREFIX
+from bonehub_quality_check_server.models import REVIEWER
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase, close_logging
@@ -49,8 +50,11 @@ class CredentialsOffTheShareTests(QCTestCase):
     def test_no_credential_file_ever_reaches_the_share(self):
         store = self.make_store()
         alice, _api_key = store.create_user("alice")
-        assignment = store.next_subject(alice)
-        store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]))
+        self.review(store, alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.edit(store, alice, ["FEMUR_LEFT", "FEMUR_RIGHT"], grown=["FEMUR_RIGHT"])
+        store.create_user("bob")
+        self.review(store, store._users["bob"])
+        store.approve("001_000001")
 
         on_share = {path.name for path in self.dataset_root.rglob("*")}
         for name in SECRET_FILE_NAMES:
@@ -83,21 +87,6 @@ class CredentialsOffTheShareTests(QCTestCase):
         self.assertNotIn("chosen-in-the-env-file", printed)
         self.assertIn("BONEHUB_QC_ADMIN_KEY", printed)
 
-    def test_credentials_an_older_server_left_on_the_share_are_reported_not_used(self):
-        """Server 0.1 kept its keys and reviewers in <dataset>/.bonehub_qc/ itself."""
-        self.state_root.mkdir(parents=True)
-        (self.state_root / "server_private_key").write_text("old-private-key", encoding="utf-8")
-        (self.state_root / "users.json").write_text("[]", encoding="utf-8")
-
-        store, printed = start_server(self)
-        self.assertEqual(
-            sorted(path.name for path in store.credentials_on_share), ["server_private_key", "users.json"]
-        )
-        self.assertNotEqual(store.private_key, "old-private-key")
-        self.assertIn("WARNING", printed)
-        self.assertIn("delete them", (self.state_dir / "server.log").read_text(encoding="utf-8"))
-        self.assertTrue((self.state_root / "users.json").exists(), "nothing on the share is deleted for you")
-
 
 class ServerSessionTests(QCTestCase):
     """Two servers with their own admins on one dataset, as two containers would be."""
@@ -114,8 +103,8 @@ class ServerSessionTests(QCTestCase):
     def test_each_server_keeps_its_state_in_its_own_folder(self):
         self.assertEqual(self.first.state_dir.parent, self.second.state_dir.parent)
         self.assertNotEqual(self.first.state_dir, self.second.state_dir)
-        self.first.next_subject(self.alice)
-        self.second.next_subject(self.bob)
+        self.first.next_subject(self.alice, REVIEWER)
+        self.second.next_subject(self.bob, REVIEWER)
 
         def stored(store, name):
             return json.loads((store.state_dir / name).read_text(encoding="utf-8"))
@@ -135,32 +124,51 @@ class ServerSessionTests(QCTestCase):
             self.first.authenticate(bob_key)
 
     def test_a_subject_out_on_one_server_is_not_handed_out_by_the_other(self):
-        on_first = self.first.next_subject(self.alice)
-        on_second = self.second.next_subject(self.bob)
+        on_first = self.first.next_subject(self.alice, REVIEWER)
+        on_second = self.second.next_subject(self.bob, REVIEWER)
         self.assertNotEqual(on_first.subject_key, on_second.subject_key)
 
         stats = self.second.stats()
         self.assertEqual((stats.assigned, stats.assigned_by_other_servers, stats.available), (1, 1, 1))
 
     def test_a_subject_given_back_on_one_server_is_free_for_the_other(self):
-        leases = [self.first.next_subject(self.alice) for _ in range(3)]
+        leases = [self.first.next_subject(self.alice, REVIEWER) for _ in range(3)]
         with self.assertRaises(QCError) as ctx:
-            self.second.next_subject(self.bob)
+            self.second.next_subject(self.bob, REVIEWER)
         self.assertEqual(ctx.exception.status_code, 404)
 
         self.first.release_assignment(leases[1].assignment_id)
-        self.assertEqual(self.second.next_subject(self.bob).subject_key, leases[1].subject_key)
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, leases[1].subject_key)
 
     def test_an_expired_lease_on_another_server_blocks_nothing(self):
-        lease = self.first.next_subject(self.alice)
+        lease = self.first.next_subject(self.alice, REVIEWER)
         lease.expires_at = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat().replace("+00:00", "Z")
         self.first._save_assignments()
-        self.assertEqual(self.second.next_subject(self.bob).subject_key, lease.subject_key)
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, lease.subject_key)
+
+    def test_a_subject_in_progress_on_one_server_is_not_handed_out_by_the_other(self):
+        """Its verdicts wait for the first server's administrator; the dataset does not show them yet."""
+        self.review(self.first, self.alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
+        self.assertEqual(self.second.stats().assigned_by_other_servers, 1)
+
+    def test_once_approved_there_it_is_done_here_too(self):
+        self.review(self.first, self.alice)
+        self.first.approve("001_000001")
+        self.second.refresh_index()
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000002")
+        self.assertEqual(self.second.stats().eligible_subjects, 2, "the dataset says it is reviewed")
+
+    def test_a_subject_closed_on_one_server_is_free_for_the_other(self):
+        self.review(self.first, self.alice, rejected={"FEMUR_RIGHT": "quality"})
+        self.first.close_case("001_000001")
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000001")
 
     def test_a_broken_state_file_of_another_server_is_ignored(self):
         """Another server may be halfway through replacing its file."""
         (self.first.state_dir / "assignments.json").write_text("[{ truncated", encoding="utf-8")
-        self.assertEqual(self.second.next_subject(self.bob).subject_key, "001_000001")
+        (self.first.state_dir / "cases.json").write_text("[{ truncated", encoding="utf-8")
+        self.assertEqual(self.second.next_subject(self.bob, REVIEWER).subject_key, "001_000001")
 
 
 class SessionRecordTests(QCTestCase):

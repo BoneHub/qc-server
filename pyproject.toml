@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bonehub-dataset-quality-check-server"
-version = "0.3.0"
-description = "Server that distributes BoneHub subjects to editors in 3D Slicer and reviewers in the browser, and writes confirmed segmentations back into the dataset."
+version = "0.4.0"
+description = "Server that distributes BoneHub subjects to reviewers in the browser and editors in 3D Slicer, and writes approved verdicts into the dataset."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [

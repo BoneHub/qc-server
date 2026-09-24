@@ -10,6 +10,7 @@ import unittest
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server.config import QCServerConfig
+from bonehub_quality_check_server.models import REVIEWER
 
 from tests.support import QCTestCase
 
@@ -137,7 +138,7 @@ class DatasetScopeTests(QCTestCase):
         store = self.make_store(allowed_dataset_ids=[2])
         _, key = store.create_user("alice")
         user = store.authenticate(key)
-        self.assertEqual(store.next_subject(user).dataset_id, 2)
+        self.assertEqual(store.next_subject(user, REVIEWER).dataset_id, 2)
 
     def test_excluded_subjects_are_not_counted_as_total_either(self):
         store = self.make_store(allowed_dataset_ids=[1])
@@ -148,8 +149,8 @@ class DatasetScopeTests(QCTestCase):
         store.create_user("alice", allowed_dataset_ids=[2])
         _, key = store.create_user("bob")
         alice = store._users["alice"]
-        self.assertEqual(store.next_subject(alice).dataset_id, 2)
-        self.assertEqual(store.next_subject(store.authenticate(key)).dataset_id, 1)
+        self.assertEqual(store.next_subject(alice, REVIEWER).dataset_id, 2)
+        self.assertEqual(store.next_subject(store.authenticate(key), REVIEWER).dataset_id, 1)
 
     def test_a_reviewer_cannot_reach_beyond_the_servers_own_restriction(self):
         """A per-user allowance widens nothing: the server's list is the outer bound."""

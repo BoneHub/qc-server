@@ -1,4 +1,4 @@
-"""Browser review page: look at a subject, tick the labels that are right, confirm or reject.
+"""Browser review page: look at a subject, and accept or reject each of its labels.
 
 ``/review`` is a single static page, like the admin panel. It asks for the reviewer's API key
 once -- or takes it from an invite link, ``/review#key=bhqc_...`` -- keeps it in the browser,
@@ -7,8 +7,9 @@ rendered in the reviewer's browser with NiiVue, so the server only sends files.
 
 The page works in the reviewer role: every request it makes says so in ``X-Client-Role``,
 and the server refuses the key of an account that is not a reviewer. It cannot edit a
-segmentation: a reviewer confirms the stored one as it is (``use_stored_segmentation``) or
-rejects it. Corrections are made in 3D Slicer, by an editor.
+segmentation: the reviewer judges it as it is (``use_stored_segmentation``), label by label,
+and reports bones it lacks. What they reject is corrected in 3D Slicer, by an editor, and
+nothing reaches the dataset before the administrator approves the subject.
 
 The page's script and NiiVue itself are served from ``/static``. NiiVue is vendored as one
 pinned file (``static/vendor/``, see ``tools/update_niivue.py``), so the page works on a

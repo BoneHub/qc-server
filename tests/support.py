@@ -42,6 +42,7 @@ from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 from bonehub_quality_check_server import auth
 from bonehub_quality_check_server.audit import AuditLog
 from bonehub_quality_check_server.config import ENV_PREFIX, QCServerConfig
+from bonehub_quality_check_server.models import EDITOR, REVIEWER
 from bonehub_quality_check_server.store import QCStore
 
 
@@ -99,19 +100,35 @@ def write_image(path: Path, shape=SHAPE, spacing=SPACING) -> Path:
     return path
 
 
-def segmentation_array(labels, shape=SHAPE) -> np.ndarray:
-    """A volume of BoneLabelMap values holding one small block per label."""
+#: The labels the fixtures paint in a place of their own, whatever else a mask holds, so that an
+#: upload leaves a label's voxels alone unless a test changes them. Others follow, in name order.
+SLOTS = ("FEMUR_LEFT", "FEMUR_RIGHT", "TIBIA_LEFT", "TIBIA_RIGHT", "SACRUM", "SKULL", "PATELLA_LEFT", "HUMERUS_LEFT")
+
+
+def segmentation_array(labels, shape=SHAPE, grown=()) -> np.ndarray:
+    """A volume of BoneLabelMap values holding one small block per label.
+
+    Label number ``n`` of ``SLOTS`` is painted into slice ``n % depth``, in rows ``2 * (n // depth)``
+    and the next, columns 0 and 1. A label in ``grown`` gets a voxel more, which is how a test
+    makes an upload change it.
+    """
+    labels = sorted(labels)
+    others = [label for label in labels if label not in SLOTS]
     data = np.zeros(shape, dtype=np.int32)
-    for index, label in enumerate(sorted(labels)):
-        if index >= shape[0]:
-            raise ValueError(f"The fixture volume {shape} has room for at most {shape[0]} labels.")
-        data[index, 0:2, 0:2] = LABEL_VALUE[label]
+    for label in labels:
+        slot = SLOTS.index(label) if label in SLOTS else len(SLOTS) + others.index(label)
+        z, y = slot % shape[0], 2 * (slot // shape[0])
+        if y + 2 > shape[1]:
+            raise ValueError(f"The fixture volume {shape} has no room left for {label}.")
+        data[z, y : y + 2, 0:2] = LABEL_VALUE[label]
+        if label in grown:
+            data[z, y, 2] = LABEL_VALUE[label]
     return data
 
 
-def write_mask(path: Path, labels, shape=SHAPE, spacing=SPACING) -> Path:
+def write_mask(path: Path, labels, shape=SHAPE, spacing=SPACING, grown=()) -> Path:
     """A ``.seg.nrrd`` holding the given labels, written the way the converters write one."""
-    write_segmentation(segmentation_array(labels, shape), reference_image(shape, spacing), path)
+    write_segmentation(segmentation_array(labels, shape, grown), reference_image(shape, spacing), path)
     return path
 
 
@@ -317,6 +334,52 @@ class QCTestCase(unittest.TestCase):
         """A fresh path for an upload, outside the dataset folder."""
         return self.tmp_path / "uploads" / f"upload_{next(self._upload_counter)}{SEGMENTATION_SUFFIX}"
 
-    def upload_file(self, labels, shape=SHAPE, spacing=SPACING) -> Path:
-        """A segmentation as a client would submit it, written outside the dataset folder."""
-        return write_mask(self.upload_path(), labels, shape, spacing)
+    def upload_file(self, labels, shape=SHAPE, spacing=SPACING, grown=()) -> Path:
+        """A segmentation as a client would submit it, written outside the dataset folder.
+
+        With the labels a subject was built with, it is the same as the stored one, voxel for
+        voxel; ``grown`` labels are changed.
+        """
+        return write_mask(self.upload_path(), labels, shape, spacing, grown)
+
+    # --- the workflow, one step at a time -----------------------------------
+    def review(self, store, user, rejected=None, accepted=None, missing=None, comment=None):
+        """``user`` leases the next subject waiting for a review and judges it, as the review
+        page does: the ``rejected`` labels with their reasons, the rest accepted unless
+        ``accepted`` names the ones to accept."""
+        assignment = store.next_subject(user, REVIEWER)
+        return store.submit(
+            assignment.assignment_id,
+            user,
+            True,
+            None,
+            confirmed_labels=accepted,
+            comment=comment,
+            use_stored_segmentation=True,
+            rejected_labels=rejected,
+            missing_labels=missing,
+        )
+
+    def edit(self, store, user, labels, grown=(), confirmed=None, comment=None):
+        """``user`` leases the next subject waiting for an editor and uploads ``labels``, as 3D
+        Slicer does; ``grown`` are the labels the correction changed."""
+        assignment = store.next_subject(user, EDITOR)
+        return store.submit(
+            assignment.assignment_id,
+            user,
+            True,
+            self.upload_file(labels, grown=grown),
+            confirmed_labels=confirmed,
+            comment=comment,
+        )
+
+    def dataset_state(self, dataset_id: int = 1) -> tuple:
+        """Everything a verdict must leave alone until approval: each Subject_info file, every
+        segmentation file's bytes, and whether the dataset's quality-check log exists."""
+        dataset = self.dataset_root / f"Dataset_{str(dataset_id).zfill(DATASET_ZFILL)}"
+        files = {
+            path.relative_to(self.dataset_root).as_posix(): path.read_bytes()
+            for path in sorted(dataset.rglob("*"))
+            if path.is_file() and not path.name.endswith("_qualitycheck.log")
+        }
+        return files, self.builder.dataset_log(dataset_id).exists()

@@ -6,7 +6,6 @@ import json
 import os
 import unittest
 
-from bonehub_data_schema import __version__ as SCHEMA_VERSION
 from bonehub_quality_check_server.config import (
     DEFAULT_CREDENTIALS_DIR,
     ENV_PREFIX,
@@ -30,7 +29,7 @@ class ConfigDefaultsTests(unittest.TestCase):
         self.assertEqual(config.eligible_label_values, [1])
         self.assertTrue(config.mark_removed_labels_absent)
         self.assertFalse(config.include_subjects_without_segmentation)
-        self.assertFalse(config.requeue_rejected)
+        self.assertTrue(config.edits_need_review, "an editor's correction goes back to a reviewer")
         self.assertIsNone(config.allowed_dataset_ids)
         self.assertEqual(config.assignment_strategy, "sequential")
         self.assertEqual(config.max_concurrent_assignments_per_user, 1)
@@ -45,11 +44,6 @@ class ConfigDefaultsTests(unittest.TestCase):
         """Status 0 is 'not available': there is nothing to review."""
         with self.assertRaises(ValueError):
             QCServerConfig(eligible_label_values=[0])
-
-    def test_the_confirmed_value_is_no_longer_a_setting(self):
-        """A confirmed label is always 2, 'available, reviewed and corrected'."""
-        with self.assertRaises(ValueError):
-            QCServerConfig(confirmed_label_value=2)
 
     def test_rejects_an_empty_eligible_list(self):
         with self.assertRaises(ValueError):
@@ -74,7 +68,7 @@ class ConfigPersistenceTests(QCTestCase):
             eligible_label_values=[1, 2],
             allowed_dataset_ids=[3, 7],
             assignment_strategy="random",
-            requeue_rejected=True,
+            edits_need_review=False,
         )
         original.save(path)
         self.assertEqual(QCServerConfig.load(path).model_dump(), original.model_dump())
@@ -90,58 +84,6 @@ class ConfigPersistenceTests(QCTestCase):
         self.assertFalse(path.with_name(path.name + ".tmp").exists())
         json.loads(path.read_text(encoding="utf-8"))
 
-    def test_the_file_records_the_schema_its_statuses_belong_to(self):
-        path = self.tmp_path / "config.json"
-        QCServerConfig().save(path)
-        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["schema_version"], SCHEMA_VERSION)
-
-
-class ConfigUpgradeTests(QCTestCase):
-    """A server kept across a schema upgrade must not read its statuses with the new meaning."""
-
-    def load_stored(self, **fields) -> tuple:
-        path = self.tmp_path / "config.json"
-        path.write_text(json.dumps({"lease_ttl_seconds": 7200, **fields}), encoding="utf-8")
-        notes = []
-        return QCServerConfig.load(path, notify=notes.append), notes
-
-    def test_a_file_of_another_schema_has_its_statuses_reset(self):
-        config, notes = self.load_stored(schema_version="9.0.0", eligible_label_values=[2])
-        self.assertEqual(config.eligible_label_values, [1])
-        self.assertEqual(config.lease_ttl_seconds, 7200, "the rest of the policy is kept")
-        self.assertTrue(any("eligible_label_values" in note for note in notes))
-
-    def test_a_file_that_records_no_schema_has_its_statuses_reset(self):
-        config, notes = self.load_stored(eligible_label_values=[2])
-        self.assertEqual(config.eligible_label_values, [1])
-        self.assertTrue(notes)
-
-    def test_a_current_file_is_read_as_it_is(self):
-        config, notes = self.load_stored(schema_version=SCHEMA_VERSION, eligible_label_values=[2])
-        self.assertEqual(config.eligible_label_values, [2])
-        self.assertEqual(notes, [])
-
-    def test_the_store_upgrades_the_file_on_disk_and_logs_it(self):
-        self.default_dataset()
-        self.state_dir.mkdir(parents=True)
-        stored = {"schema_version": "0.2.0", "eligible_label_values": [2], "lease_ttl_seconds": 7200}
-        (self.state_dir / "config.json").write_text(json.dumps(stored), encoding="utf-8")
-
-        store = self.make_store()
-        self.assertEqual(store.config.eligible_label_values, [1])
-        self.assertEqual(store.stats().eligible_subjects, 3)
-
-        saved = json.loads((self.state_dir / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved["schema_version"], SCHEMA_VERSION)
-        self.assertEqual(saved["lease_ttl_seconds"], 7200)
-        self.assertIn("eligible_label_values", (self.state_dir / "server.log").read_text(encoding="utf-8"))
-
-    def test_an_environment_override_is_read_in_the_current_statuses(self):
-        """docker-compose sets BONEHUB_QC_ELIGIBLE_LABEL_VALUES; it is taken as it is."""
-        os.environ[f"{ENV_PREFIX}ELIGIBLE_LABEL_VALUES"] = "2"
-        config, _notes = self.load_stored(eligible_label_values=[1])
-        self.assertEqual(config.eligible_label_values, [2])
-
 
 class ConfigEnvironmentOverrideTests(QCTestCase):
     """``BONEHUB_QC_*`` wins over the stored file, which is how docker-compose configures."""
@@ -151,13 +93,13 @@ class ConfigEnvironmentOverrideTests(QCTestCase):
         QCServerConfig().save(path)
 
         os.environ[f"{ENV_PREFIX}LEASE_TTL_SECONDS"] = "600"
-        os.environ[f"{ENV_PREFIX}REQUEUE_REJECTED"] = "true"
+        os.environ[f"{ENV_PREFIX}EDITS_NEED_REVIEW"] = "false"
         os.environ[f"{ENV_PREFIX}ALLOWED_DATASET_IDS"] = "1, 4, 9"
         os.environ[f"{ENV_PREFIX}ASSIGNMENT_STRATEGY"] = "random"
 
         config = QCServerConfig.load(path)
         self.assertEqual(config.lease_ttl_seconds, 600)
-        self.assertTrue(config.requeue_rejected)
+        self.assertFalse(config.edits_need_review)
         self.assertEqual(config.allowed_dataset_ids, [1, 4, 9])
         self.assertEqual(config.assignment_strategy, "random")
 
@@ -175,10 +117,10 @@ class ConfigEnvironmentOverrideTests(QCTestCase):
 
     def test_falsey_words_all_turn_a_flag_off(self):
         path = self.tmp_path / "config.json"
-        QCServerConfig(requeue_rejected=True).save(path)
+        QCServerConfig(edits_need_review=True).save(path)
         for word in ["false", "0", "no", "off"]:
-            os.environ[f"{ENV_PREFIX}REQUEUE_REJECTED"] = word
-            self.assertFalse(QCServerConfig.load(path).requeue_rejected, word)
+            os.environ[f"{ENV_PREFIX}EDITS_NEED_REVIEW"] = word
+            self.assertFalse(QCServerConfig.load(path).edits_need_review, word)
 
 
 class PathResolutionTests(QCTestCase):

@@ -2,11 +2,12 @@
 BoneHub Dataset Quality Check - server.
 
 Points at a folder that is already in BoneHub data structure format, hands subjects out
-to authenticated users -- editors, who correct them in 3D Slicer, and reviewers, who check
-them on the browser review page at ``/review`` -- and receives their verdicts, with
-corrected segmentations (``.seg.nrrd``), back. When a subject is confirmed, the labels
-vouched for in ``Subject_info_XXX.json`` are set to status ``2`` ("available, reviewed and
-corrected").
+to authenticated users -- reviewers, who accept or reject each label on the browser review
+page at ``/review``, and editors, who correct the rejected ones in 3D Slicer -- and keeps
+their verdicts, with corrected segmentations (``.seg.nrrd``), in its own state folder. When
+the administrator approves a subject, its accepted labels are set to status ``2``
+("available, reviewed and corrected") in ``Subject_info_XXX.json``, and a corrected
+segmentation replaces the dataset's.
 """
 
 from .config import QCServerConfig
@@ -21,5 +22,5 @@ __all__ = [
     "User",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __author__ = "Hamid Alavi"
