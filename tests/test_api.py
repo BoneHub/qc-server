@@ -9,11 +9,14 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
+from bonehub_quality_check_server import api
 from bonehub_quality_check_server.app import create_app
 from bonehub_quality_check_server.models import EDITOR
 
@@ -157,6 +160,29 @@ class HandoutTests(ApiTestCase):
         response = self.client.get(handout["segmentation_url"], headers=self.headers(self.alice_key))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, self.builder.segmentation_file(1, 1).read_bytes())
+
+    def test_a_download_names_the_file_and_its_size(self):
+        handout = self.next_subject(self.alice_key)
+        response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
+        image = self.builder.image_file(1, 1)
+        self.assertEqual(response.headers["content-length"], str(image.stat().st_size))
+        self.assertEqual(response.headers["content-disposition"], f'attachment; filename="{image.name}"')
+
+    def test_a_file_larger_than_one_chunk_arrives_whole(self):
+        handout = self.next_subject(self.alice_key)
+        with mock.patch.object(api, "DOWNLOAD_CHUNK_BYTES", 7):
+            response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
+        self.assertEqual(response.content, self.builder.image_file(1, 1).read_bytes())
+
+    @unittest.skipUnless(hasattr(os, "posix_fadvise"), "read-ahead is turned off on Linux, where the server runs")
+    def test_a_download_reads_the_share_without_read_ahead(self):
+        """Read-ahead fills the one connection to the share, and every other user's request waits behind it."""
+        handout = self.next_subject(self.alice_key)
+        with mock.patch("os.posix_fadvise") as fadvise:
+            response = self.client.get(handout["image_url"], headers=self.headers(self.alice_key))
+        self.assertEqual(response.status_code, 200)
+        fadvise.assert_called_once()
+        self.assertEqual(fadvise.call_args.args[3], os.POSIX_FADV_RANDOM)
 
     def test_one_client_cannot_download_another_clients_subject(self):
         handout = self.next_subject(self.alice_key)

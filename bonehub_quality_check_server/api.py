@@ -23,10 +23,12 @@ is missing from the handout and refused at its download endpoint.
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Header, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 
 from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
 
@@ -47,6 +49,9 @@ from .store import LABEL_NAME_TO_VALUE, QCError, QCStore
 router = APIRouter(prefix="/api/v1", tags=["client"])
 
 UPLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
+#: How much of a file a download reads from the share at a time; see :func:`_send_from_share`.
+DOWNLOAD_CHUNK_BYTES = 2 * 1024 * 1024
 
 #: The header in which a client names the role it works in.
 ROLE_HEADER = "X-Client-Role"
@@ -137,18 +142,18 @@ def assignment_detail(assignment_id: str, request: Request, user: User = Depends
 
 
 @router.get("/assignments/{assignment_id}/image")
-def download_image(assignment_id: str, request: Request, user: User = Depends(get_user)) -> FileResponse:
+def download_image(assignment_id: str, request: Request, user: User = Depends(get_user)) -> StreamingResponse:
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
     _require_sent(user, "image", user.receives_image)
     path = store.image_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"The image for {assignment.subject_key} is missing on the server.", status_code=404)
-    return FileResponse(path, media_type="application/gzip", filename=path.name)
+    return _send_from_share(path, media_type="application/gzip")
 
 
 @router.get("/assignments/{assignment_id}/segmentation")
-def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_user)) -> FileResponse:
+def download_segmentation(assignment_id: str, request: Request, user: User = Depends(get_user)) -> StreamingResponse:
     """The stored segmentation, as the dataset keeps it (``.seg.nrrd``)."""
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
@@ -156,7 +161,7 @@ def download_segmentation(assignment_id: str, request: Request, user: User = Dep
     path = store.segmentation_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"Subject {assignment.subject_key} has no segmentation yet.", status_code=404)
-    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+    return _send_from_share(path, media_type="application/octet-stream")
 
 
 @router.post("/assignments/{assignment_id}/extend", response_model=Assignment)
@@ -298,6 +303,34 @@ def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHando
         image_url=f"{base}/image" if has_image else None,
         segmentation_url=f"{base}/segmentation" if has_segmentation else None,
     )
+
+
+def _send_from_share(path: Path, media_type: str) -> StreamingResponse:
+    """Stream a file from the dataset share without holding up everyone else's requests.
+
+    The server reaches the share over one SMB connection. Read the usual way, a download fills
+    that connection with megabytes of read-ahead, and every other request waits behind them:
+    on a 17 MB/s share, another user's next subject took as long as the whole download, 13 s
+    instead of 0.2 s. Read 2 MB at a time with read-ahead off, it took 1.8 s, and the download
+    was as fast.
+    """
+    return StreamingResponse(
+        _read_in_chunks(path),
+        media_type=media_type,
+        headers={
+            "Content-Length": str(path.stat().st_size),
+            "Content-Disposition": f'attachment; filename="{path.name}"',
+        },
+    )
+
+
+def _read_in_chunks(path: Path) -> Iterator[bytes]:
+    """The file, :data:`DOWNLOAD_CHUNK_BYTES` at a time; Starlette reads it in a worker thread."""
+    with open(path, "rb", buffering=0) as f:
+        if hasattr(os, "posix_fadvise"):  # Linux, where the server runs; the tests also run on Windows
+            os.posix_fadvise(f.fileno(), 0, 0, os.POSIX_FADV_RANDOM)  # "random" access: no read-ahead
+        while chunk := f.read(DOWNLOAD_CHUNK_BYTES):
+            yield chunk
 
 
 def _require_sent(user: User, what: str, sent: bool) -> None:
