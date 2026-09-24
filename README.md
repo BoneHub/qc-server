@@ -1,200 +1,444 @@
 # BoneHub Dataset Quality Check — Server
 
-Server side of a client–server setup for human-in-the-loop quality check of segmentations
-in the [BoneHub Dataset](https://github.com/BoneHub/BoneHub-Dataset).
+This server runs a human quality check of the segmentations in a
+[BoneHub Dataset](https://github.com/BoneHub/BoneHub-Dataset). It hands out subjects one at a
+time to three kinds of people:
 
-It points at a folder that is already in BoneHub data structure format and hands subjects
-out one at a time to authenticated users. Each user is a **reviewer**, an **editor**, or
-both. Reviewers work in the browser, on the server's own
-[review page](#reviewing-in-the-browser), which needs no installation but cannot edit: they
-accept or reject each label of a subject's segmentation, and report bones it lacks. What
-they reject goes to the editors, who correct it in 3D Slicer with the BoneHub extension; a
-correction goes back to a reviewer, unless the administrator switched that off.
+- **Reviewers** look at a segmentation in their web browser and accept or reject each bone
+  (each *label*). They can also report bones that are missing.
+- **Editors** fix what the reviewers rejected, in 3D Slicer.
+- **You, the administrator,** approve the result. **Nothing is written into the dataset until
+  you approve a subject.**
 
-Nothing reaches the dataset until the administrator approves a subject. Every verdict and
-every corrected segmentation waits in the server's own state folder; approving a subject
-sets its accepted labels to status `2` ("available, reviewed and corrected") in
-`Subject_info_XXX.json`, and moves an editor's correction into the dataset. See
-[the quality check](#the-quality-check).
+The server runs in Docker, on any computer that can reach the dataset folder, whether on a
+local disk or an SMB share.
 
-The server runs in Docker; there is no other supported way to run it.
+## Contents
 
-## Features
+- [How it works](#how-it-works)
+- [Install and start](#install-and-start)
+- [First-time setup](#first-time-setup)
+- [The admin panel](#the-admin-panel)
+- [Everyday tasks](#everyday-tasks)
+- [Settings](#settings)
+- [Users, roles and keys](#users-roles-and-keys)
+- [Labels, stages and what approval writes](#labels-stages-and-what-approval-writes)
+- [Running the server](#running-the-server)
+- [Where the server keeps things](#where-the-server-keeps-things)
+- [Troubleshooting](#troubleshooting)
+- [What reviewers and editors see](#what-reviewers-and-editors-see)
+- [For developers](#for-developers)
 
-- A quality check in stages: reviewers judge each label, editors correct what reviewers
-  reject, reviewers check the corrections, and the administrator approves. Labels a
-  correction leaves alone keep their verdicts; labels it changes are reviewed again.
-- Nothing is written into the dataset before the administrator's approval, from the
-  [admin panel](#approving-subjects), one subject at a time or all at once.
-- Leased assignments: a user holds a subject for a limited time, after which it returns to
-  the queue automatically.
-- Per-user API keys and [roles](#users-and-roles): a reviewer works on the review page, an
-  editor in 3D Slicer, and a user may be both. Keys can be restricted to specific dataset
-  ids, and each user has a choice of what they are sent of each subject: the image and its
-  segmentation, the segmentation only, or the image only.
-- Browser review page at `/review`: a reviewer opens a link, looks at the subject in 3D and
-  in slices, and accepts or rejects each label. Everything is rendered in the reviewer's
-  browser.
-- Browser admin panel at `/admin` for approvals, users and their roles, the queue, the
-  audit trail and the policy.
-- Validation of every upload (BoneHub `.seg.nrrd` format, every segment a BoneHub label,
-  geometry match against the subject's image, size cap). What waits for approval is the
-  upload rewritten in canonical form, and the dataset's segmentation is backed up before an
-  approval replaces it.
-- Audit trail: `submissions.jsonl` and `server.log` in the server's state folder, and a
-  human-readable `Dataset_XXX_qualitycheck.log` next to each dataset recording what was
-  approved into it.
-- Credentials stay inside the container, never on the dataset share.
-- Several servers, each with its own admin, can work on one dataset: each keeps its state
-  in a folder of its own, and none hands out a subject another one has out or in progress.
+## How it works
 
-## Requirements
+### Who does what
 
-- Docker with Compose v2 (Docker Desktop, or Docker Engine on Linux)
-- Read-write access to a folder in BoneHub data structure format (`Dataset_001`,
-  `Dataset_002`, ...), written with BoneHub data schema 0.3 — see
-  [Dataset format](#dataset-format)
+| Who | Works in | Does |
+| --- | --- | --- |
+| Administrator | the admin panel, `http://<host>:8000/admin` | creates users, follows progress, approves results |
+| Reviewer | the review page, `http://<host>:8000/review`, in any modern browser; nothing to install | accepts or rejects each label, reports missing bones |
+| Editor | 3D Slicer, with the [BoneHub Quality Check extension](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension) | corrects rejected labels, adds missing bones, segments subjects that have no segmentation |
 
-## Installation
+One person can be both a reviewer and an editor. The server never asks anyone to review their
+own correction.
+
+### The path of a subject
+
+```
+  new subject
+      │
+      ▼
+   REVIEW ◄───────────────────────────────┐  the correction goes back to a reviewer
+      │ a reviewer judges each label      │  (unless you switched that off)
+      │                                   │
+      ├── a label rejected or missing ──► EDIT ── editor cannot fix it ──► ESCALATED
+      │                                   │                                (you decide)
+      │ every label accepted              │ correction accepted on the editor's word
+      ▼                                   │ (only when corrections need no review)
+   APPROVAL ◄─────────────────────────────┘
+      │ you approve
+      ▼
+   APPROVED: written into the dataset
+```
+
+1. **A reviewer judges the subject.** Each label is accepted, or rejected because it *needs
+   correction* or *should not be there*. Bones the segmentation lacks are reported *missing*.
+2. **If anything is rejected or missing, an editor corrects it** in 3D Slicer and uploads the
+   corrected segmentation.
+3. **A reviewer checks the correction.** The review page shows the editor's version. You can
+   switch this step off: see [Should corrections go back to a reviewer?](#should-corrections-go-back-to-a-reviewer)
+4. **You approve the subject** in the admin panel. Only then does the server update
+   `Subject_info_XXX.json` and replace the dataset's segmentation with the correction. See
+   [What approval writes](#what-approval-writes).
+
+An editor who cannot fix a subject (the image is unusable, for example) sends it to you with
+a comment. It then shows as *escalated*.
+
+### Which subjects are handed out
+
+- Every subject with at least one label of status `1` ("available, not reviewed") in its
+  `Subject_info_XXX.json`. These go to reviewers first.
+- Subjects with an image but no segmentation, only if you turn on **Queue subjects without
+  segmentation**. These go straight to editors, to segment from scratch.
+- Subjects already in progress are handed out before new ones.
+- An approved subject is never handed out again by the same server.
+
+## Install and start
+
+### Requirements
+
+- Docker with Compose v2 (Docker Desktop, or Docker Engine on Linux).
+- Read and write access to the dataset folder: the folder that contains `Dataset_001`,
+  `Dataset_002`, and so on, written with BoneHub data schema 0.3.
+
+### Steps
 
 ```bash
 git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
 cd bonehub_dataset_quality_check_server
-cp .env.example .env                          # then say where the dataset is
+cp .env.example .env                          # then edit .env: say where the dataset is
 docker compose up -d --build
 docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
 ```
 
-Open `http://<host>:8000/admin` and log in with that key. Reviewers use
-`http://<host>:8000/review`; editors connect the 3D Slicer extension to
-`http://<host>:8000`.
+Then open `http://<host>:8000/admin` and sign in with that key. `<host>` is the name or IP
+address of the computer running Docker; use `localhost` on that computer itself.
 
-The dataset is on a disk of the Docker host or on an SMB share. Say which in `.env`: fill
-in one of the two and leave the other blank.
+### Tell the server where the dataset is
+
+In `.env`, fill in **one** of the two options and leave the other blank:
 
 | Dataset on | Variable | Example |
 | --- | --- | --- |
-| a disk of the Docker host | `BONEHUB_DATASET_PATH` | `C:/data/BoneHub_Dataset` |
+| a disk of this computer | `BONEHUB_DATASET_PATH` | `C:/data/BoneHub_Dataset` |
 | an SMB share | `BONEHUB_DATASET_SHARE` | `//192.168.0.10/Data/BoneHub/BoneHub_Dataset` |
 | | `BONEHUB_SMB_USERNAME` | `alice` |
 | | `BONEHUB_SMB_PASSWORD` | the share password |
 | | `BONEHUB_SMB_OPTIONS` | `domain=AD,vers=3.0` |
 
-A local folder is bind-mounted; the share is mounted by Docker itself. If both are filled
-in, the local folder is used. `docker compose` refuses to start when neither is, or when a
-share is given without its username and password.
+- If both are filled in, the local folder is used. `docker compose` refuses to start when
+  neither is, or when a share is missing its username or password.
+- **A mapped network drive (`Z:`) is not a local folder.** Put its UNC path in
+  `BONEHUB_DATASET_SHARE`. `net use` shows the UNC path behind each drive letter. Docker
+  Desktop cannot mount a drive letter. Given one, it mounts an empty folder instead, and the
+  server starts with `0 of 0 subjects`.
+- A share password cannot contain a comma. Write a `$` in it as `$$`.
+- **After changing the share or any `BONEHUB_SMB_…` value**, recreate the share's volume.
+  This loses nothing, because the volume only holds the connection to the share:
 
-A mapped network drive is not a local folder. Give its share as a UNC path in
-`BONEHUB_DATASET_SHARE`, **not** as a drive letter in `BONEHUB_DATASET_PATH`: Docker
-Desktop cannot bind-mount a mapped network drive. Handed `Z:/BoneHub/BoneHub_Dataset` it
-creates an empty folder and mounts that instead, so the server starts normally against an
-empty dataset and reports `0 of 0 subjects`. `net use` prints the UNC path behind each
-mapped drive. A share password containing a comma cannot be used (the comma ends the mount
-option), and a literal `$` must be written `$$`.
+  ```bash
+  docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
+  ```
 
-The share is mounted through a named volume whose options are fixed when it is first
-created, so after changing the share or any SMB value recreate it:
-
-```bash
-docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
-```
-
-That volume holds no data of its own — only the mount to the share — so nothing is lost.
-
-The server keeps its state in the dataset folder (see
-[Where the server keeps things](#where-the-server-keeps-things)). To move a dataset from a
-share to a local disk or back, copy its `.bonehub_qc` folder along, or the server finds no
-state there and starts on an empty one.
-
-To update the server, pull and rebuild; the server keeps its admin key and users:
+### Update the server
 
 ```bash
 git pull && docker compose up -d --build
 ```
 
-Update the 3D Slicer extension together with the server; the two share one definition of
-the API. The server reads only the state files of its own version: if a new version refuses
-to start on the state an older one left, start a new server (`docker compose down -v`, see
-[Where the server keeps things](#where-the-server-keeps-things)).
+The server keeps its admin key, its users and all work in progress.
 
-## The quality check
+**Update the 3D Slicer extension at the same time.** The extension refuses to connect to a
+server of a different version (major.minor). If a new server version refuses to start on the
+state an older one left behind, start a
+[new server](#where-the-server-keeps-things).
 
-Every subject goes through the same stages. A subject that a user has given a verdict on
-has a *case* on the server, which records every verdict, and where the subject stands:
+## First-time setup
 
-| Stage | Waits for | Handed to |
-| --- | --- | --- |
-| review | a reviewer's verdict on the labels under review | reviewers |
-| edit | a correction: a reviewer rejected a label, or reported one missing | editors |
-| approval | the administrator: every label is accepted, or left as it was | nobody |
-| escalated | the administrator: an editor could not correct it | nobody |
-| approved | — it is in the dataset | nobody, ever again |
-| closed | — the administrator closed it; nothing was written | nobody, unless sent back |
+1. **Sign in.** Open `http://<host>:8000/admin` and enter the admin key printed at the first
+   start. Lost it? See [The admin key](#the-admin-key).
+2. **Check the dataset is found.** The **Queue** section shows *Subjects total* and
+   *Eligible*. If both are 0, the dataset is not mounted: see
+   [Troubleshooting](#troubleshooting).
+3. **Check the policy.** The defaults suit a first quality check. The
+   [Settings](#settings) section explains each one. Settings in `.env` win over the panel at
+   every start.
+4. **Create users** under **Create user**. Pick their roles and what they are sent. The key is
+   shown **once**:
+   - send a reviewer their **invite link**, which opens the review page already signed in;
+   - send an editor their **key** and the server's address, `http://<host>:8000`.
+5. **Editors install the extension.** Its
+   [README](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension)
+   explains how.
+6. **If users connect from outside a trusted network, put HTTPS in front of the server.** Keys
+   and images travel with every request.
 
-A subject nobody has looked at yet goes to the reviewers — every subject with a label of
-status `1`, by default — except one without any segmentation, which goes to the editors.
-The labels of a subject are each in one state:
+## The admin panel
 
-| Label | Meaning |
+Open `http://<host>:8000/admin`. The panel keeps your key until you close the browser tab.
+
+**Top buttons:**
+
+- **Refresh** reloads every section.
+- **Re-scan dataset** reads the dataset folder again right away. Otherwise the server does
+  this every 5 minutes, so new subjects or changed `Subject_info` files show up within
+  5 minutes.
+- **Sign out** forgets the key in this tab.
+
+### Queue
+
+A count of subjects at each point of the quality check:
+
+| Box | Counts subjects that… |
 | --- | --- |
-| to review | waits for a reviewer: the dataset has it as not reviewed, or an editor changed it |
-| accepted | a reviewer accepted it — or its editor, when corrections need no review |
-| rejected | a reviewer rejected it: it needs correction, should not be there, or is missing |
-| removed | not in the segmentation; it becomes `0`, not available, on approval |
-| kept | not under review — the dataset has it as reviewed already — and left as it is |
+| Awaiting approval | have every label accepted and wait for you. Highlighted when above 0 |
+| Escalated | an editor could not fix and sent to you. Highlighted when above 0 |
+| To review | are in progress and wait for a reviewer |
+| To edit | are in progress and wait for an editor |
+| Out now | someone is working on right now |
+| Not started | are eligible and nobody has looked at yet |
+| Approved | you approved; they are written into the dataset |
+| Closed | you closed without writing anything |
+| On other servers | another server that uses this dataset has out or in progress |
+| Eligible | match the queue policy |
+| Subjects total | are in the dataset |
 
-What each step does:
+A subject someone is working on counts under *Out now*, not under its stage. Below the boxes,
+the panel shows when the dataset was last read and how many eligible subjects each dataset has.
 
-1. **A reviewer judges the subject**, on the review page. Each label under review is
-   accepted or rejected: it *needs correction*, or *should not be there* at all. A bone the
-   segmentation lacks is reported *missing*. A reviewer may also reject a label that is not
-   under review. With every label accepted, the subject waits for approval; with any label
-   rejected or missing, it goes to the editors, and the accepted labels keep their verdicts
-   while it is away.
-2. **An editor corrects it**, in 3D Slicer, told which labels were rejected and why, and
-   what the reviewers wrote. The upload replaces the segmentation under review, and the
-   server compares it with the one it replaces, voxel by voxel:
-   - a label the upload changed or added, and a label a reviewer had rejected, is
-     *corrected*: it goes back to a reviewer — or, with
-     [`edits_need_review`](#configuration) off, it is accepted if the editor vouches for it;
-   - a label the upload left alone keeps its verdict, so a correction that spills into an
-     accepted neighbour takes that neighbour's acceptance away, and one that does not
-     leaves it;
-   - a label the upload takes away is removed. If a reviewer said it should not be there,
-     that is final; otherwise a reviewer must agree first, when corrections need review;
-   - a label nobody has reviewed yet stays to be reviewed, whatever the editor vouches for.
-3. **A reviewer checks the correction**, which the review page shows in place of the
-   dataset's segmentation. The editor is never handed their own correction to review. An
-   editor's removal is agreed to by accepting it, and undone by rejecting it as missing.
-4. **The administrator approves the subject**, and only now is the dataset written: see
-   [Approving subjects](#approving-subjects).
+### Approvals
 
-An editor who cannot correct a subject — the image is unusable, say — rejects it with a
-comment, and it goes to the administrator. The administrator can send any subject back to
-the reviewers (every verdict is reviewed again) or to the editors (with a comment), or
-close it without writing anything.
+This is where you decide. The **Showing** menu picks what to list:
 
-A segmentation that is not on its image's voxel grid cannot be accepted as it is: the review
-page starts its labels rejected, and the editor who corrects it writes it back on the grid.
+| Showing | Lists subjects that… |
+| --- | --- |
+| waiting for approval (default) | are ready for you to approve |
+| sent to you by an editor | are escalated |
+| waiting for a reviewer | are in progress, at a reviewer |
+| waiting for an editor | are in progress, at an editor |
+| approved | are finished and written into the dataset |
+| closed | you closed |
+| all | are in any of the above |
 
-## Administration
+Each row shows:
 
-### The admin key
+- **Stage**: where the subject is.
+- **Labels**: a summary such as "3 accepted · 1 to review". Click it to see every label: its
+  state and who stands behind it, for example "accepted by rita, corrected by eddie". For a
+  subject waiting for approval, the line below says what approving will write, for example
+  "On approval: 3 set to 2".
+- **Segmentation**: "the dataset's own" or "correction by eddie". **Download** saves it as a
+  `.seg.nrrd` file, to open in 3D Slicer.
+- **Latest**: the last step, who took it, and their comment.
 
-A new server generates an admin key and prints it once, in the startup banner, unless
-`BONEHUB_QC_ADMIN_KEY` in `.env` chooses one. The key is kept inside the container, never
-on the share. If it is lost, print it again from the running container:
+The buttons:
 
-```bash
-docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
-```
+| Button | What it does |
+| --- | --- |
+| **Approve** | Writes this subject into the dataset. Only for subjects waiting for approval |
+| **Approve all waiting** | Approves every subject waiting for approval, and lists any it could not approve, with the reason |
+| **To reviewers** | Sends the subject back to the reviewers: every verdict is reviewed again. You can add a comment |
+| **To editors** | Sends the subject to an editor with your comment, for example what to fix |
+| **Close** | Ends the quality check of this subject without writing anything. It is not handed out again unless you press To reviewers or To editors, which reopen it |
 
-or start a new server, which issues a new admin key (see
-[Where the server keeps things](#where-the-server-keeps-things)).
+While someone is working on a subject, its buttons are replaced by "with *name*". To act on it
+anyway, release it first under **Assignments**. An approved subject has no buttons: it is
+finished.
 
-### Users and roles
+### Create user and Users
 
-From the admin panel, or with the server's command line inside the running container:
+**Create user** makes a new account: a name, its roles, which datasets it may see (blank means
+all), what it is sent of each subject, and an optional note. **Create & issue key** shows the
+key once, together with an invite link for a reviewer. See
+[Users, roles and keys](#users-roles-and-keys).
+
+The **Users** table lists every account:
+
+| Column | Shows |
+| --- | --- |
+| Key | the first characters of the key, to tell keys apart |
+| Status | active or disabled |
+| Roles | reviewer, editor, or both. Change them here at any time |
+| Open | subjects they hold right now |
+| Reviewed / Edited | how many subjects they reviewed and corrected |
+| Sent | what they are sent of each subject. Change it here at any time |
+| Datasets | the datasets they may see |
+
+The buttons:
+
+- **New key** issues a new key. The old one stops working immediately.
+- **Disable** blocks the account until you press **Enable**.
+- **Delete** removes the account. Any subjects the user holds go back to the queue.
+
+### Assignments
+
+One row each time a subject was handed to someone:
+
+| State | Meaning |
+| --- | --- |
+| assigned | the user has it right now |
+| submitted | the user sent a verdict or a correction. The *Verdict* column says what it did and where the subject went |
+| released | the user or you handed it back unfinished |
+| expired | the lease ran out and the subject went back to the queue |
+
+**Release** on an assigned row returns the subject to the queue now, for example when someone
+is away. The **State** menu filters the list.
+
+### Recent activity
+
+The last 50 events: verdicts, corrections, approvals, subjects handed out, and changes to
+users. Comments appear here too.
+
+### Policy
+
+The server's settings. Change them and press **Save policy**. They take effect at once, and the
+dataset is re-scanned. See [Settings](#settings) for what each one does. Settings that
+`.env` or `docker-compose.yml` set come back at the next restart.
+
+## Everyday tasks
+
+**Approve finished subjects.** Under **Approvals**, show *waiting for approval*. Open the
+**Labels** summary to see who accepted what. If you want to look yourself, **Download** the
+segmentation and open it in 3D Slicer. Then press **Approve**, or **Approve all waiting**.
+
+**Deal with an escalated subject.** Show *sent to you by an editor* and read the editor's
+comment under **Latest**. Then:
+
+- **To editors**, with a comment saying what to do, if it can be fixed after all;
+- **To reviewers**, if the verdicts should be looked at again;
+- **Close**, if the subject cannot be used. Nothing is written into the dataset.
+
+**Send back a subject that does not look right.** Before approving, press **To reviewers** (to
+have every label judged again) or **To editors** (with a comment saying what to fix).
+
+**Free a subject someone is holding.** A subject returns to the queue by itself when the lease
+runs out, 24 hours by default. To free it sooner, press **Release** under **Assignments**.
+Users can extend their own lease, from the review page or from 3D Slicer.
+
+**Replace a lost or leaked key.** Press **New key** for that user and send them the new key or
+invite link.
+
+**Remove someone.** **Disable** blocks them for now. **Delete** removes them, and their open
+subjects go back to the queue.
+
+**Review subjects that were reviewed before.** Set `BONEHUB_QC_ELIGIBLE_LABEL_VALUES=1,2` in
+`.env` and restart. Subjects with labels of status `2` then enter the queue as well. Subjects
+this server has already approved are not handed out again.
+
+**Have editors segment subjects that have no segmentation.** Turn on **Queue subjects without
+segmentation**. These subjects go to editors only. An editor who is sent the image only can
+segment them too.
+
+**Check what happened to a subject.** Under **Approvals**, show *all* and open its **Labels**.
+**Recent activity** and the [log files](#logs-and-audit-trail) have the full history.
+
+## Settings
+
+### Where settings come from
+
+You can change a setting in two places:
+
+- **The Policy section of the admin panel.** The change applies at once and is saved in the
+  server's `config.json`.
+- **`.env`**, as `BONEHUB_QC_<NAME>`. A value set there **wins over the panel at every start**.
+
+> **Three settings are always set by `docker-compose.yml`**, even when `.env` leaves them
+> blank: *Eligible label statuses* (`1`), *Lease TTL* (`86400`) and *Max subjects per user and
+> role* (`1`). A change you make to these in the panel lasts only until the next restart or
+> update. Change them in `.env` instead.
+
+`docker-compose.yml` passes only some variables to the server: the three above, plus
+`BONEHUB_QC_ALLOWED_DATASET_IDS`, `BONEHUB_QC_EDITS_NEED_REVIEW` and the keys. To set any other
+setting from `.env`, also add it to the `environment:` block of `docker-compose.yml`, the same
+way as the others.
+
+### All settings
+
+| In the panel | In `.env` (`BONEHUB_QC_…`) | Default | What it does |
+| --- | --- | --- | --- |
+| Eligible label statuses | `ELIGIBLE_LABEL_VALUES` | `1` | Which label statuses put a subject in the queue. `1` = not reviewed. Use `1,2` to also review already reviewed subjects |
+| Lease TTL (seconds) | `LEASE_TTL_SECONDS` | `86400` (24 h) | How long a user keeps a subject before it returns to the queue. At least 60 |
+| Max subjects per user and role | `MAX_CONCURRENT_ASSIGNMENTS_PER_USER` | `1` | How many subjects one user can hold at once, in each role |
+| Assignment strategy | `ASSIGNMENT_STRATEGY` | `sequential` | `sequential` hands out the lowest subject number first; `random` picks one at random |
+| Editors' corrections go back to a reviewer | `EDITS_NEED_REVIEW` | on | See [below](#should-corrections-go-back-to-a-reviewer) |
+| Queue subjects without segmentation | `INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION` | off | Also hand out subjects that have an image but no segmentation, to editors, to segment from scratch |
+| Mark removed labels not available | `MARK_REMOVED_LABELS_ABSENT` | on | On approval, set a label that is no longer in the segmentation to `0` |
+| Require geometry match | `REQUIRE_GEOMETRY_MATCH` | on | Refuse a segmentation whose voxel grid differs from its image |
+| Keep segmentation backups | `KEEP_SEGMENTATION_BACKUPS` | on | Copy the dataset's segmentation into `backups/` before an approval replaces it |
+| — | `ALLOWED_DATASET_IDS` | all | Use only these datasets, for example `10,12`. Blanking it later does **not** undo it: set it to `none` |
+| — | `INDEX_REFRESH_SECONDS` | `300` | How often the dataset folder is read again. `0` reads it on every request |
+| — | `MAX_UPLOAD_BYTES` | `536870912` (512 MB) | Largest correction an editor can upload |
+
+Other variables in `.env`:
+
+| Variable | What it does |
+| --- | --- |
+| `BONEHUB_QC_PORT` | The port the server is reached on. Default `8000` |
+| `BONEHUB_QC_ADMIN_KEY` | Choose the admin key yourself. Blank: the server makes one at its first start |
+| `BONEHUB_QC_PRIVATE_KEY` | The secret behind every user key. Blank: the server makes one. **Changing it makes every issued key stop working** |
+
+Most changes apply from each user's next request. A new lease time applies to subjects handed
+out after the change. `bonehub-qc-server show-config` prints the settings in use.
+
+### Should corrections go back to a reviewer?
+
+This is the **Editors' corrections go back to a reviewer** setting.
+
+**On (default, safest).** Every label an editor changed, added or fixed goes back to a
+reviewer before you can approve it.
+
+**Off (faster).** 3D Slicer shows a tick box next to each label, ticked by default:
+
+- a label the editor changed and left **ticked** is accepted on the editor's word, and the
+  subject can go straight to approval;
+- a label the editor changed and **unticked** still goes to a reviewer;
+- a label the editor removed is removed without a reviewer, and a missing bone the editor did
+  not add stays out;
+- a label that nobody has reviewed yet still needs a reviewer. An editor's word is not a
+  review.
+
+> **Editors must reconnect after you change this setting.** 3D Slicer reads it only when the
+> editor presses **Connect**. Until they disconnect and connect again, Slicer works with the old
+> value. When you switch the setting off, Slicer shows no tick boxes and every correction still
+> goes to a reviewer. When you switch it on, their ticks are ignored, so again every correction
+> goes to a reviewer.
+
+## Users, roles and keys
+
+### Roles
+
+| Role | Works in | Is handed | Can |
+| --- | --- | --- | --- |
+| Reviewer | the review page | subjects waiting for a review | accept or reject each label, report missing bones, reject the whole subject, hand the subject back |
+| Editor | 3D Slicer | subjects a reviewer sent back, and subjects with no segmentation | upload a corrected segmentation, send the subject to you, hand the subject back |
+
+- New users get both roles unless you untick one. Every user needs at least one.
+- A user with both roles can hold subjects in each role at the same time.
+- The server checks the role on every request. A reviewer who connects from 3D Slicer is told
+  to use the review page. An editor-only user cannot sign in to the review page.
+- Role changes apply from the user's next request.
+
+### What a user is sent
+
+Set under **Sent to the user** when you create them, and changeable in the **Users** table:
+
+| Setting | Sent | Good for |
+| --- | --- | --- |
+| Image + segmentation (default) | both | most users |
+| Segmentation only | the segmentation | reviewers who judge the shape of the bones without the image. They are not handed subjects without a segmentation |
+| Image only | the image | editors who segment from scratch. As reviewers, they can only reject the subject or report missing bones, not accept a label they have not seen |
+
+A file a user is not sent cannot be downloaded by them either.
+
+### Datasets a user may see
+
+Leave **Dataset ids** blank for all datasets, or list some, for example `1,3`. The user is then
+handed subjects of those datasets only.
+
+### Keys
+
+- **A key is shown only once**, when you create the user or press **New key**. The server keeps
+  only a fingerprint of it, so it cannot show the key again.
+- **Reviewers** get an **invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs them
+  in to the review page. The key after `#` never reaches the server's logs. The link still *is*
+  the key, so send it privately.
+- **Editors** get the key and the server address, which they enter in the 3D Slicer extension.
+- **Copy key** and **Copy invite link** work only over HTTPS or on `localhost`. Otherwise, select
+  the text and copy it by hand.
+
+### From the command line
+
+Everything under **Users** can also be done inside the running container:
 
 ```bash
 docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
@@ -205,79 +449,297 @@ docker compose exec bonehub-qc-server bonehub-qc-server list-users
 docker compose exec bonehub-qc-server bonehub-qc-server rotate-key --name alice
 ```
 
-**Roles.** Each user is a reviewer, an editor, or both, which is the default (`--roles` on
-the command line, two tick boxes in the admin panel):
+`--roles` takes `reviewer`, `editor` or `reviewer,editor` (the default). `--data-access` takes
+`image_and_segmentation` (the default), `segmentation` or `image`. The running server sees the
+change at once.
 
-| Role | Works in | Is handed | Can |
-| --- | --- | --- | --- |
-| Reviewer | the review page, `/review` | subjects waiting for a review | accept or reject each label as it is, report missing bones, reject the whole subject, release |
-| Editor | 3D Slicer, with the BoneHub Quality Check extension | subjects a reviewer sent back, and subjects without a segmentation | upload the corrected segmentation, send the subject to the administrator, release |
+## Labels, stages and what approval writes
 
-Each client names the role it works in, on every request, and the server refuses a user who
-does not hold it: a reviewer connecting from 3D Slicer is told to use the review page, with
-its address, and an editor cannot sign in to the review page. A user with both roles can use
-both, and holds up to `max_concurrent_assignments_per_user` subjects in each; a subject is
-submitted in the role it was handed out in. What a role may do is checked against the
-account itself, whichever client a request comes from: only an editor uploads a
-segmentation, and only a reviewer judges one as it is. Roles can be changed in the Users
-table at any time and apply from the user's next request; a user needs at least one.
+### Stages
 
-The API key is shown once, at creation. For a reviewer the admin panel shows it together with
-an **invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs them in to the
-review page by itself. The part after `#` never reaches the server, so the key stays out of
-its logs; the link is the credential all the same, so send it privately. For an editor, hand
-over the key and the server URL, which they enter in the 3D Slicer extension. The running
-server sees a user added from the command line at once.
-
-**What a user is sent** is set per user when creating them, and can be changed in the Users
-table at any time (`--data-access` on the command line):
-
-| Setting | Sent | They can |
+| Stage (as the panel shows it) | Meaning | Handed to |
 | --- | --- | --- |
-| Image + segmentation (default) | both | whatever their roles allow |
-| Segmentation only | the segmentation | as a reviewer, judge the labels without the image. Not handed subjects without a segmentation |
-| Image only | the image | as a reviewer, reject the subject with a comment or report missing bones, but not accept a label they have not seen; as an editor, create a segmentation for a subject that has none |
+| to review | waits for a reviewer | reviewers |
+| to edit | a reviewer rejected a label or reported one missing, or you sent it to the editors | editors |
+| awaiting approval | every label is accepted, or not under review | nobody: waits for you |
+| escalated | an editor could not fix it | nobody: waits for you |
+| approved | written into the dataset | nobody, ever again |
+| closed | you ended it without writing anything | nobody, unless you send it back |
 
-A file a user is not sent is left out of their handout and refused at its download endpoint,
-whichever client asks. Every verdict records the user's setting in the audit trail.
+### Label states
 
-### Approving subjects
+| State (as the panel shows it) | Meaning |
+| --- | --- |
+| to review | waits for a reviewer: never reviewed, or an editor changed it |
+| accepted | a reviewer accepted it, or the editor vouched for it when corrections need no review |
+| rejected | a reviewer rejected it: it *needs correction*, *should not be there*, or *is missing* |
+| removed | no longer in the segmentation. Becomes `0` on approval |
+| kept | already reviewed in the dataset (status `2`) and not under review. Left as it is |
 
-The **Approvals** section of the admin panel lists the subjects in progress, by stage —
-those waiting for approval first. Each shows every label with its state and who stands
-behind it ("accepted by rita, corrected by eddie"), whether the segmentation is the
-dataset's own or an editor's correction — which **Download** saves, to look at in 3D Slicer —
-and the latest step with its comment.
+### What an editor's correction does to each label
 
-**Approve** writes one subject into the dataset; **Approve all waiting** writes every subject
-waiting for approval, and reports any it could not. Approving:
+The server compares the correction with the segmentation it replaces, voxel by voxel:
 
-- sets each accepted label to `2` in `Subject_info_XXX.json`, and each label no longer in the
-  segmentation to `0` (with `mark_removed_labels_absent`, the default);
-- backs up the dataset's segmentation into the server's `backups/` folder, and moves the
-  editor's correction into the dataset, if there is one;
-- writes a line into `Dataset_XXX_qualitycheck.log` saying who accepted and who corrected
-  each label.
+- **Labels the editor changed or added, and labels a reviewer rejected,** go back to a reviewer,
+  or are accepted when [corrections need no review](#should-corrections-go-back-to-a-reviewer)
+  and the editor ticked them.
+- **Labels the editor did not touch** keep their verdict. If a correction spills into an
+  accepted neighbouring bone, that neighbour loses its acceptance and is reviewed again.
+- **Labels the editor deleted** are removed. If a reviewer said the label should not be there,
+  the removal is final. Otherwise a reviewer must agree first, when corrections need review.
+  The reviewer agrees by accepting the removal, and undoes it by reporting the bone missing.
+- **A bone reported missing that the editor did not add** goes back to a reviewer, when
+  corrections need review, so the reviewer sees the editor disagreed.
 
-An approval is refused when the dataset's segmentation changed after the subject's quality
-check began — another tool or another server wrote it — since approving would overwrite
-that; send the subject back to review instead. It is refused too when the dataset was
-regenerated under another schema. If `Subject_info` cannot be written, the segmentation is put
-back, so no subject is left half approved.
+### What approval writes
 
-**To reviewers**, **To editors** and **Close** are there for every subject that is not approved
-yet, and for a closed one, which they reopen; they wait while a user holds the subject.
+Approving a subject:
 
-### Other commands
+1. sets each **accepted** label to `2` ("available, reviewed and corrected") in
+   `Subject_info_XXX.json`;
+2. sets each label **no longer in the segmentation** to `0` ("not available"), if *Mark
+   removed labels not available* is on (the default);
+3. sets a label that **is in the segmentation** but that `Subject_info` listed as `0`, or not at
+   all, to `1`, unless it was accepted;
+4. **replaces the dataset's segmentation with the editor's correction**, if there is one. The
+   old segmentation is backed up into the server's `backups/` folder first;
+5. adds a line to **`Dataset_XXX_qualitycheck.log`** next to the dataset, saying who accepted and
+   who corrected each label.
+
+Labels that were not under review keep their status.
+
+Approval is **refused** when:
+
+- the dataset's segmentation changed after the subject's quality check began, because another
+  tool or another server wrote it. Approving would overwrite that change. Send the subject
+  back to review instead;
+- the dataset was regenerated under another schema version.
+
+If `Subject_info` cannot be written, the old segmentation is put back. A subject is never left
+half approved.
+
+## Running the server
+
+### The admin key
+
+A new server makes an admin key and prints it once, when it first starts. Alternatively, set
+your own with `BONEHUB_QC_ADMIN_KEY` in `.env`. The key is kept on the Docker host, never on
+the dataset share. To print it again:
 
 ```bash
-docker compose exec bonehub-qc-server bonehub-qc-server stats         # the queue, by stage
-docker compose exec bonehub-qc-server bonehub-qc-server show-config   # the effective policy
-docker compose exec bonehub-qc-server bonehub-qc-server sessions      # every server of this dataset
-docker compose logs -f                                                 # the server's output
+docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key
 ```
 
-Endpoints:
+### Command line
+
+Run these on the computer where the server runs, in the project folder:
+
+| Command | What it does |
+| --- | --- |
+| `docker compose up -d` | Start the server (or apply changes to `.env`) |
+| `docker compose restart` | Restart it |
+| `docker compose down` | Stop it. Keeps everything |
+| `docker compose logs -f` | Follow the server's output |
+| `docker compose exec bonehub-qc-server bonehub-qc-server stats` | The queue, by stage |
+| `docker compose exec bonehub-qc-server bonehub-qc-server show-config` | The settings in use |
+| `docker compose exec bonehub-qc-server bonehub-qc-server sessions` | Every server that has worked on this dataset |
+| `docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key` | Print the admin key |
+
+> **`docker compose down -v` deletes the server's identity.** The next start creates a new
+> server, with a new admin key, no users, and an empty queue. See
+> [Where the server keeps things](#where-the-server-keeps-things).
+
+### Logs and audit trail
+
+| Where | What |
+| --- | --- |
+| Admin panel, **Recent activity** | the last 50 events |
+| `.bonehub_qc/<server id>/submissions.jsonl` | every verdict, correction and administrative action, never rewritten |
+| `.bonehub_qc/<server id>/server.log` | server starts, verdicts, warnings, and datasets that were skipped, with the reason |
+| `Dataset_XXX_qualitycheck.log`, next to each dataset | a readable record of what was approved into that dataset |
+| `docker compose logs` | the server's console output |
+
+### Security
+
+- Every user has their own key. You can restrict a key to some datasets, and replace or
+  disable it at any time.
+- Keys travel with every request. **Use HTTPS** (a reverse proxy in front of the server) when
+  users connect over anything but a trusted network.
+- The admin key and user accounts stay on the Docker host, never on the dataset share.
+- Every upload is checked before it is kept: it must be a BoneHub `.seg.nrrd` file, every
+  segment must be a BoneHub label, its voxel grid must match the image, and it must be no
+  larger than `MAX_UPLOAD_BYTES` (512 MB by default).
+
+## Where the server keeps things
+
+The server keeps its data in two places.
+
+**Credentials, on the Docker host**, in the `bonehub_qc_credentials` Docker volume: the
+server's id, its private key, the admin key, and the user accounts. They are never written to
+the dataset share.
+
+**Everything else, in the dataset folder**, in a folder of the server's own:
+
+```
+<dataset-root>/.bonehub_qc/<server id>/
+├── session.json          which server this is, when it was created and last started
+├── config.json           the settings
+├── assignments.json      who has or had which subject
+├── cases.json            subjects in progress: every verdict so far, and where each stands
+├── cases_done.jsonl      subjects approved or closed, one line each
+├── staged/               editors' corrections, waiting for your approval
+├── submissions.jsonl     audit trail
+├── server.log            server log
+├── backups/              the dataset's segmentations from before an approval replaced them
+└── tmp/                  uploads being checked
+```
+
+**The credentials volume *is* the server:**
+
+| You run | Result |
+| --- | --- |
+| `docker compose up -d`, `restart`, `up -d --build`, `down` then `up -d` | The same server: same admin key, users and work in progress |
+| `docker compose down -v`, then `up -d` | A **new** server: new id, new admin key (printed once), no users, empty queue. The old server's folder stays in the dataset as history |
+
+**To keep a server safe**, keep both the `bonehub_qc_credentials` volume and the
+`.bonehub_qc` folder in the dataset.
+
+**Moving the dataset** from a share to a local disk, or back: copy its `.bonehub_qc` folder
+along. Otherwise the server finds no work in progress at the new location.
+
+**Several servers on one dataset.** Servers with different administrators can work on the same
+dataset, at the same time or one after the other. Each keeps its own folder. A server never
+hands out a subject that another server has out or in progress, because that subject's
+verdicts wait for the other administrator. `bonehub-qc-server sessions` lists the servers.
+
+## Troubleshooting
+
+**The queue shows 0 subjects (`0 of 0`).**
+The dataset is not mounted. Check the path in `.env`. A mapped drive letter such as `Z:` does
+not work: use its UNC path in `BONEHUB_DATASET_SHARE` (see
+[Tell the server where the dataset is](#tell-the-server-where-the-dataset-is)). After fixing
+`.env`, run `docker compose up -d`.
+
+**A dataset is missing from the queue.**
+Its `Dataset_info_XXX.json` records a schema version other than 0.3, or none at all.
+`server.log` names the dataset and the reason. Regenerate it with the current BoneHub
+converters. Also check `BONEHUB_QC_ALLOWED_DATASET_IDS`.
+
+**New subjects, or edits to `Subject_info`, do not show up.**
+The server reads the dataset every 5 minutes. Press **Re-scan dataset** to read it now.
+
+**I switched off "Editors' corrections go back to a reviewer", but corrections still go to
+review.**
+- The editor has not reconnected in 3D Slicer since you changed it. Slicer reads the setting
+  only at **Connect**.
+- The editor unticked those labels.
+- The labels had never been reviewed. They always need a reviewer.
+
+**A setting I changed in the panel came back after a restart.**
+`.env` or `docker-compose.yml` sets it. See
+[Where settings come from](#where-settings-come-from).
+
+**A subject has no buttons, only "with *name*".**
+Someone is working on it. Wait, or press **Release** under **Assignments**.
+
+**Approve is refused: "the dataset's segmentation changed".**
+Something other than this server changed the segmentation in the dataset after the quality
+check began. Press **To reviewers** so the current segmentation is reviewed.
+
+**A user's verdict was not recorded: "handed out again" or "changed after it was handed out".**
+Their lease ran out and someone else got the subject, or someone else (or you) acted on the
+subject in the meantime. The server keeps the newer work and drops theirs. They ask for the
+next subject.
+
+**A reviewer cannot sign in from 3D Slicer, or an editor cannot sign in to the review page.**
+3D Slicer is for editors and the review page for reviewers. Send the user to the right tool,
+or tick the other role for them in the **Users** table.
+
+**Nobody gets any subjects.**
+Check that users hold the right roles and datasets, that *Eligible* is above 0, and that no
+other server has the subjects (*On other servers*).
+
+**I lost the admin key.**
+Print it again: `docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key`.
+
+**Everyone's key stopped working.**
+`BONEHUB_QC_PRIVATE_KEY` changed. Issue new keys, or put the old value back.
+
+## What reviewers and editors see
+
+It helps to know what your users do, so you can guide them.
+
+### Reviewers: the review page
+
+The review page, `/review`, needs nothing but a current Chrome, Edge, Firefox or Safari with
+WebGL 2. Everything is drawn in the reviewer's own browser. The page cannot edit
+segmentations. A reviewer:
+
+1. opens their invite link, or `/review`, and enters their key. **Remember** keeps the key in
+   that browser; otherwise it is forgotten when the tab closes;
+2. presses **Get next subject**. A subject they already hold opens again by itself. A subject
+   that has been through an editor says so, shows the editor's version, and lists the comments
+   so far;
+3. looks at the subject: a 3D view of the bones, and slices of the image with the labels on
+   top. Clicking a label moves to that bone; the eye icon hides it; the target shows it alone.
+   **Outline**, **Distinct colours**, a CT window and a single-plane view help with details;
+4. gives each label a verdict: ✓ accepts it, ✗ rejects it with a reason (*needs correction* or
+   *should not be there*). Every label starts accepted. **A bone the segmentation lacks**
+   reports a missing bone. A comment explains what is wrong;
+5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
+   **Reject subject** (rejects every label under review), or **Release** (hands it back).
+
+Labels the reviewer did not judge wait for another reviewer. A segmentation that is not on
+its image's voxel grid starts with its labels rejected, so that an editor fixes it.
+
+**Large scans.** Very large CTs are shown at reduced resolution: at most 256 million voxels in
+the slices and 64 million in the 3D view. For example, 0.6 mm slices are shown at 1.2 mm. The
+page says so, and notes it in the reviewer's comment. On the test machine, a 150–450-million-voxel
+CT took 15–25 seconds to open and used 1.5–3 GB of browser memory. A small scan opens in a few
+seconds.
+
+### Editors: 3D Slicer
+
+Editors need 3D Slicer 5.6 or newer and the
+[BoneHub Quality Check extension](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension),
+whose README covers installing and using it. In short, an editor:
+
+1. enters the server address and their key, and presses **Connect**;
+2. asks for the next subject. The panel lists the labels reviewers rejected or reported
+   missing, with their comments;
+3. corrects the segmentation in the Segment Editor;
+4. uploads the correction, or **Reject**s the subject with a comment to send it to you.
+
+When [corrections need no review](#should-corrections-go-back-to-a-reviewer), each label has a
+tick box: ticked labels are accepted on the editor's word.
+
+## For developers
+
+### Dataset format
+
+The server follows [BoneHub data schema](https://github.com/BoneHub/BoneHub-Dataset) 0.3:
+
+- **Segmentations** are `Segmentation/<dataset>_<subject>.seg.nrrd`. Voxels hold per-file
+  segment numbers, and the header maps each number to its `BoneLabelMap` label (nine-digit
+  values built from structure, part, tissue and side). Segmentations travel between server
+  and client in this format both ways.
+- **Label statuses** in `Subject_info_XXX.json`:
+
+  | Status | Meaning | Queued by default |
+  | --- | --- | --- |
+  | `0` | not available (same as the label being absent) | no: nothing to review |
+  | `1` | available, not reviewed or corrected | yes |
+  | `2` | available, reviewed and corrected (if necessary) | no; add it to `eligible_label_values` for a second review |
+
+- **Schema version.** Each `Dataset_info_XXX.json` records the `schema_version` it was written
+  with. A dataset of another major.minor version, or one that records none, is skipped, with the
+  reason in `server.log`. The server refuses to start if the installed `bonehub_data_schema` is
+  not 0.3.x.
+
+A label is under review when its status is one of `eligible_label_values`, and also when the
+segmentation paints it while `Subject_info` lists it as not available, or not at all.
+
+### Endpoints
 
 | URL | What it is |
 | --- | --- |
@@ -287,174 +749,58 @@ Endpoints:
 | `/health` | Unauthenticated liveness probe |
 | `/api/v1/...` | Client API, authenticated with `X-API-Key`, in the role named by `X-Client-Role` |
 | `/admin/api/...` | Admin API, authenticated with `X-Admin-Key`; `cases` holds the approvals |
-| `/static/...` | The pages' script and the vendored NiiVue viewer |
+| `/static/...` | The pages' scripts and the vendored NiiVue viewer |
 
-## Reviewing in the browser
+### Client flow
 
-The review page at `/review` is for reviewers, who only need to look: nothing to install, and
-all rendering happens in the reviewer's browser with [NiiVue](https://github.com/niivue/niivue),
-so the server only sends files. A user who is not a reviewer is refused at sign-in. A reviewer:
+Every request carries the user's key in `X-API-Key` and the client's role in `X-Client-Role`:
+`editor` from the 3D Slicer extension, `reviewer` from the review page. A request without the
+role, or in a role the user does not hold, is refused (400 and 403). Both clients follow the
+same sequence:
 
-1. opens the invite link, or `/review` and enters their key. "Remember" keeps the key in this
-   browser; otherwise it is forgotten when the tab closes;
-2. presses **Get next subject**. A subject they already hold, for instance after closing the
-   tab, is opened again by itself. A subject that has been through an editor says so, shows
-   the editor's correction, and lists what happened to it so far, with the comments;
-3. looks at it. The 3D view renders the labels, and the slices show the image with the labels
-   over it. Clicking a label in the list moves the crosshair onto that bone, the eye hides it,
-   and the target shows it alone. **Outline**, **Distinct colours** (neighbouring bones in
-   clearly different colours, instead of the dataset's own), a CT window and a single-plane
-   view help with the details;
-4. gives each label under review a verdict: ✓ accepts it, ✗ rejects it, and a rejected
-   label takes a reason, *needs correction* or *should not be there*. Every label under
-   review starts accepted. A bone the segmentation lacks is reported under **A bone the
-   segmentation lacks**. A comment says what is wrong;
-5. presses **Accept** — or **Send to editors**, when something is rejected or missing — or
-   **Reject subject**, which rejects every label under review, or **Release**.
-
-The page cannot edit, and nothing it sends reaches the dataset before the administrator
-approves the subject. Corrections are made in 3D Slicer, by an editor.
-
-A segmentation that is not on its image's voxel grid cannot be accepted as it is. The server
-holds it to the same geometry check as an upload (`require_geometry_match`), so the page says
-so and starts its labels rejected, for an editor to write it back on the image's grid.
-
-**Large scans.** The browser needs several copies of a volume in GPU memory, and in testing a
-450-million-voxel whole-body CT would not display at full resolution. The page therefore
-shows at most 256 million voxels in the slices, and 64 million in the 3D view, by leaving out
-every second voxel along the finest axes (for example 0.6 mm slices shown at 1.2 mm). It says
-so above the labels, and adds a note to the comment of a verdict given on such a view. On
-the machine it was tested on, a 150–450-million-voxel CT took 15–25 seconds to open once
-downloaded, and 1.5–3 GB of browser memory; a small scan opens in a few seconds.
-
-**Browsers.** A current Chrome, Edge, Firefox or Safari with WebGL 2. Use HTTPS in front of
-the server when users connect over anything but a trusted network: the API key and the
-images travel in every request.
-
-NiiVue is vendored as one self-contained file in
-`bonehub_quality_check_server/static/vendor/` (BSD-2-Clause; its license is next to it), so
-the page works on networks that cannot reach a CDN. To update it:
-
-```bash
-python tools/update_niivue.py 0.69.0     # downloads, checks and unpacks that version
-```
-
-then point the import at the top of `static/review.js` at the new file, delete the old one,
-and run the tests. The page uses one NiiVue internal (`refreshLayers`), so check it after an
-update.
-
-## Where the server keeps things
-
-**Credentials** — the server's id, its private key, the admin key, and the user accounts
-with their roles and key digests — are kept inside the container, in `/var/lib/bonehub-qc`,
-which docker-compose mounts from the `bonehub_qc_credentials` volume on the Docker host.
-They are never written to the dataset share, and the server refuses to start if its
-credentials folder is inside the dataset.
-
-**Everything else** is on the share, in a folder of the server's own, named after its id:
-
-```
-<dataset-root>/.bonehub_qc/<server id>/
-├── session.json          which server this is, when it was created and last started
-├── config.json           quality-check policy
-├── assignments.json      open and finished leases
-├── cases.json            the subjects in progress: every verdict so far, and where each stands
-├── cases_done.jsonl      the subjects approved or closed, one line each
-├── staged/               editors' corrected segmentations (.seg.nrrd), waiting for approval
-├── submissions.jsonl     append-only audit trail
-├── server.log            server lifecycle, verdicts and administrative events
-├── backups/              the dataset's segmentations (.seg.nrrd), kept before an approval replaced them
-└── tmp/                  uploads being validated
-```
-
-The credentials volume *is* the server:
-
-| You run | What happens |
-| --- | --- |
-| `docker compose up -d`, `restart`, `up -d --build` | Same server: same admin key, users and state folder |
-| `docker compose down -v`, then `up -d` | A **new** server: a new id and state folder, a new admin key (printed once), no users. The old server's folder stays on the share as history |
-
-Several servers, each with its own admin, can therefore work on one dataset — from
-different machines, or one after the other — without overwriting each other: each has its
-own state folder, and a server does not hand out a subject that another one has out, or in
-progress. A subject in progress on another server carries verdicts that wait for that
-server's administrator and are not in the dataset yet, so it is left to that server until
-its administrator approves or closes it. `bonehub-qc-server sessions` lists the servers.
-Changing `BONEHUB_QC_PRIVATE_KEY` invalidates every API key already issued.
-
-## Dataset format
-
-The server follows [BoneHub data schema](https://github.com/BoneHub/BoneHub-Dataset) 0.3:
-
-- **Segmentations** are `Segmentation/<dataset>_<subject>.seg.nrrd`: voxels hold per-file
-  segment numbers, and the header maps each number to its `BoneLabelMap` label (nine-digit
-  values built from structure, part, tissue and side). Segmentations travel between server
-  and client in this format both ways.
-- **Label statuses** in `Subject_info_XXX.json`:
-
-  | Status | Meaning | Queued for review by default |
-  | --- | --- | --- |
-  | `0` | not available (same as the label being absent) | no — nothing to review |
-  | `1` | available, not reviewed or corrected | yes |
-  | `2` | available, reviewed and corrected (if necessary) | no; add it to `eligible_label_values` for a second review |
-
-- **Schema version.** Each `Dataset_info_XXX.json` records the `schema_version` it was
-  written with. A dataset of another major.minor version — or one that records none — is
-  skipped, with the reason in `server.log`; regenerate it with the current converters. The
-  server itself refuses to start if the installed `bonehub_data_schema` is not 0.3.x.
-
-What an approved subject does to each label of `Subject_info_XXX.json`:
-
-| Label | New status |
-| --- | --- |
-| Accepted — by a reviewer, or by its editor when corrections need no review | `2` |
-| In the segmentation but not under review (kept) | unchanged; `1` if it was absent or `0` |
-| No longer in the segmentation | `0` (with `mark_removed_labels_absent`, the default) |
-
-A label is under review when its status is one of `eligible_label_values`, and also when the
-segmentation paints it while `Subject_info` lists it as not available, or not at all.
-
-## Client flow
-
-Every request carries the user's key in `X-API-Key` and the role the client works in in
-`X-Client-Role`: `editor` from the 3D Slicer extension, `reviewer` from the review page. A
-request without the role, or in a role the user does not hold, is refused (400 and 403). The
-two clients follow the same sequence:
-
-1. `GET /api/v1/ping` — check the key and its role; reports the server's `schema_version`,
-   the user's `roles`, the `role` of this request, the user's `data_access`, and whether
-   corrections go back to a reviewer (`edits_need_review`)
-2. `GET /api/v1/labels` — the label map, the label statuses and the reasons to reject a label
-3. `POST /api/v1/subjects/next` — lease the next subject for this role
-4. `GET /api/v1/assignments/{id}/image` — download the image (`.nii.gz`)
-5. `GET /api/v1/assignments/{id}/segmentation` — download the segmentation under review
-   (`.seg.nrrd`): an editor's correction waiting for approval, or the dataset's own
-6. `POST /api/v1/assignments/{id}/submit` — send the verdict back, as multipart with a
-   `metadata` part:
+1. `GET /api/v1/ping`: checks the key and its role. Reports the server's `schema_version`, the
+   user's `roles`, the `role` of this request, the user's `data_access`, and whether corrections
+   go back to a reviewer (`edits_need_review`)
+2. `GET /api/v1/labels`: the label map, the label statuses and the reasons to reject a label
+3. `POST /api/v1/subjects/next`: leases the next subject for this role
+4. `GET /api/v1/assignments/{id}/image`: downloads the image (`.nii.gz`)
+5. `GET /api/v1/assignments/{id}/segmentation`: downloads the segmentation under review
+   (`.seg.nrrd`), which is an editor's correction waiting for approval, or the dataset's own
+6. `POST /api/v1/assignments/{id}/submit`: sends the verdict, as multipart with a `metadata`
+   part:
    - a reviewer: `quality_check_confirmed: true`, `use_stored_segmentation: true`,
      `confirmed_labels` (accepted), `rejected_labels` (label → `quality`, `absent`, or
      `missing` for one not in the segmentation), `missing_labels`, `comment`. No file.
      `quality_check_confirmed: false` rejects every label under review;
    - an editor: `quality_check_confirmed: true`, the corrected `.seg.nrrd` as the
-     `segmentation` part, `confirmed_labels` (vouched for), `comment`.
-     `quality_check_confirmed: false` sends the subject to the administrator.
+     `segmentation` part, `confirmed_labels` (vouched for; omitted, every label in the upload
+     counts as vouched for), `comment`. `quality_check_confirmed: false` sends the subject to
+     the administrator.
 
    The response says where the subject went (`stage`), what the verdict accepted, rejected,
    corrected and removed, which labels now wait for a reviewer, and a message for the user.
 
-The handout says what there is for this user to download (`has_image`,
-`has_segmentation`, and a URL for each), which follows their `data_access`, and whether the
-segmentation is an editor's correction (`segmentation_source`). It carries the subject's
-`stage`, every label with its state, reason and who gave it (`labels`), open requests from the
-administrator (`requests`), and the subject's quality check so far with its comments
-(`history`). With the segmentation it also carries `segments`, read from the file header: each
-segment's number, BoneHub label and value, colour and bounding box, and
-`stored_segmentation_issue`: why the segmentation could not be accepted as it is, if there is a
-reason.
+`POST /api/v1/assignments/{id}/extend` extends a lease and `.../release` hands the subject back.
 
-[`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client
-for the same API; it is the file shipped inside the Slicer extension. It works as an editor,
-unless it is given `role="reviewer"`:
+The handout says what there is for this user to download (`has_image`, `has_segmentation`, and
+a URL for each), which follows their `data_access`, and whether the segmentation is an editor's
+correction (`segmentation_source`). It carries the subject's `stage`, every label with its
+state, reason and who gave it (`labels`), open requests from the administrator (`requests`),
+and the subject's quality check so far with its comments (`history`). With the segmentation it
+also carries `segments`, read from the file header: each segment's number, BoneHub label and
+value, colour and bounding box. `stored_segmentation_issue` says why the segmentation cannot be
+accepted as it is, if there is a reason.
+
+An upload must be a single-layer `.seg.nrrd` on the image's voxel grid, and every segment must
+resolve to a BoneHub label: through its `BoneHubValue` tag, else its name, as
+`bonehub_data_schema.read_segmentation` reads it. Anything else is refused with a message
+naming the problem.
+
+### Reference client
+
+[`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client for
+the API. It is the file shipped inside the Slicer extension. It works as an editor unless it is
+given `role="reviewer"`:
 
 ```python
 from pathlib import Path
@@ -474,41 +820,24 @@ reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stor
                 confirmed_labels=["FEMUR_LEFT"], rejected_labels={"FEMUR_RIGHT": "quality"})
 ```
 
-An upload must be a single-layer `.seg.nrrd` on the image's voxel grid, and every segment
-must resolve to a BoneHub label — through its `BoneHubValue` tag, else its name, as
-`bonehub_data_schema.read_segmentation` reads it. Anything else is refused with a message
-naming the problem.
+### Updating NiiVue
 
-## Configuration
+The review page draws with [NiiVue](https://github.com/niivue/niivue), vendored as one
+self-contained file in `bonehub_quality_check_server/static/vendor/` (BSD-2-Clause; its license
+is next to it), so the page works on networks that cannot reach a CDN. To update it:
 
-The policy is set in `.env`, as one `BONEHUB_QC_<FIELD>` variable per setting, and can be
-changed at runtime from the admin panel. The server stores it in its `config.json`; a
-variable set in `.env` wins over the stored value at every start. The most used settings:
+```bash
+python tools/update_niivue.py 0.69.0     # downloads, checks and unpacks that version
+```
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `allowed_dataset_ids` | `null` | Restrict the server to these dataset ids; `null` means every dataset under the root |
-| `eligible_label_values` | `[1]` | Label statuses that queue a subject for review (`1` not reviewed, `2` reviewed) |
-| `edits_need_review` | `true` | Send the labels an editor corrected back to a reviewer; `false` accepts those the editor vouches for |
-| `include_subjects_without_segmentation` | `false` | Also queue subjects with an image but no available label, for editors to segment from scratch |
-| `mark_removed_labels_absent` | `true` | On approval, set a label no longer in the segmentation to `0` |
-| `lease_ttl_seconds` | `86400` | How long a user keeps a subject |
-| `max_concurrent_assignments_per_user` | `1` | Subjects one user may hold at once, in each role |
-| `assignment_strategy` | `sequential` | `sequential` or `random` handout order |
-| `require_geometry_match` | `true` | Refuse a segmentation whose voxel grid differs from the image |
-| `keep_segmentation_backups` | `true` | Back up the dataset's segmentation before an approval replaces it |
-| `max_upload_bytes` | `536870912` | Largest accepted segmentation upload |
+Then point the import at the top of `static/review.js` at the new file, delete the old one, and
+run the tests. The page uses one NiiVue internal (`refreshLayers`), so check it after an update.
 
-See [`.env.example`](.env.example) for the variables and
-[`config.py`](bonehub_quality_check_server/config.py) for the full list. A setting that
-`.env` does not name is added to the `environment:` block of `docker-compose.yml` the same
-way as the others.
-
-## Tests
+### Tests
 
 The suite is plain `unittest` and runs in the server's own image, so it needs nothing but
-Docker. It builds a throw-away dataset in BoneHub data structure format under a temporary
-folder for every test, so it never touches a real dataset.
+Docker. It builds a throw-away dataset in BoneHub data structure format under a temporary folder
+for every test, so it never touches a real dataset.
 
 ```bash
 docker build -t bonehub-qc-server .
