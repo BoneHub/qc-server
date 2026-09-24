@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 from .config import ENV_PREFIX, QCServerConfig, resolve_credentials_dir, resolve_state_root
+from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS
 from .store import QCStore
 
 
@@ -64,6 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(add_user)
     add_user.add_argument("--name", required=True)
     add_user.add_argument("--datasets", default=None, help="Comma-separated dataset ids this reviewer may see.")
+    add_user.add_argument(
+        "--data-access",
+        choices=list(DATA_ACCESS_DESCRIPTIONS),
+        default=DEFAULT_DATA_ACCESS,
+        help="What the reviewer is sent of each subject (default: %(default)s).",
+    )
     add_user.add_argument("--note", default="")
 
     list_users = subparsers.add_parser("list-users", help="List reviewers and their progress.")
@@ -112,8 +119,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "add-user":
         datasets = [int(x) for x in args.datasets.split(",")] if args.datasets else None
-        user, api_key = store.create_user(name=args.name, allowed_dataset_ids=datasets, note=args.note)
-        print(f"Created reviewer '{user.name}'.")
+        user, api_key = store.create_user(
+            name=args.name, allowed_dataset_ids=datasets, note=args.note, data_access=args.data_access
+        )
+        print(f"Created reviewer '{user.name}', who is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}.")
         print(f"API key (shown once): {api_key}")
         return 0
 
@@ -122,12 +131,15 @@ def main(argv: list[str] | None = None) -> int:
         if not users:
             print("No reviewers yet.")
             return 0
-        print(f"{'name':<24}{'key':<16}{'active':<8}{'open':<6}{'confirmed':<11}{'rejected':<10}datasets")
+        print(
+            f"{'name':<24}{'key':<16}{'active':<8}{'open':<6}{'confirmed':<11}{'rejected':<10}"
+            f"{'receives':<24}datasets"
+        )
         for user in users:
             datasets = "all" if user["allowed_dataset_ids"] is None else ",".join(map(str, user["allowed_dataset_ids"]))
             print(
                 f"{user['name']:<24}{user['key_prefix']:<16}{str(user['active']):<8}"
-                f"{user['open']:<6}{user['confirmed']:<11}{user['rejected']:<10}{datasets}"
+                f"{user['open']:<6}{user['confirmed']:<11}{user['rejected']:<10}{user['data_access']:<24}{datasets}"
             )
         return 0
 

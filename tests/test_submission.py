@@ -9,14 +9,17 @@ reviewed is status 2, whatever status the label had before.
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import SimpleITK as sitk
 
 from bonehub_data_schema import read_segmentation_labels
+from bonehub_quality_check_server import store as store_module
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import LABEL_VALUE, QCTestCase, segment_header, write_image, write_raw_mask
@@ -599,6 +602,45 @@ class AuditTrailTests(QCTestCase):
         self.assertTrue(self.builder.dataset_log(2).exists())
         self.assertIn("002_000001", self.builder.dataset_log(2).read_text(encoding="utf-8"))
         self.assertNotIn("002_000001", self.builder.dataset_log(1).read_text(encoding="utf-8"))
+
+
+class RefusedReplaceTests(QCTestCase):
+    """Windows refuses, for a moment, to replace a file that another process has open.
+
+    A virus scanner looking at a Subject_info file just written is enough, and so is another
+    client that has the file open on an SMB share.
+    """
+
+    def test_a_briefly_refused_write_still_lands(self):
+        self.builder.add_subject(1, 1, segmentation={"FEMUR_LEFT": 1})
+        store = self.make_store()
+        alice = store.create_user("alice")[0]
+        assignment = store.next_subject(alice)
+        real_replace = os.replace
+        refused = []
+
+        def refuse_twice(source, target):
+            if str(target).endswith("Subject_info_001.json") and len(refused) < 2:
+                refused.append(target)
+                raise PermissionError(13, "Access is denied")
+            real_replace(source, target)
+
+        with mock.patch("bonehub_quality_check_server.store.os.replace", side_effect=refuse_twice), mock.patch(
+            "bonehub_quality_check_server.store.time.sleep"
+        ):
+            store.submit(assignment.assignment_id, alice, True, self.upload_file(["FEMUR_LEFT"]))
+        self.assertEqual(len(refused), 2)
+        self.assertEqual(self.builder.subject_info(1, 1)["segmentation"], {"FEMUR_LEFT": 2})
+
+    def test_a_refusal_that_lasts_is_still_reported(self):
+        source = self.tmp_path / "new.json"
+        source.write_text("{}", encoding="utf-8")
+        with mock.patch(
+            "bonehub_quality_check_server.store.os.replace", side_effect=PermissionError(13, "Access is denied")
+        ), mock.patch("bonehub_quality_check_server.store.time.sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                store_module._replace(source, self.tmp_path / "target.json")
+        self.assertEqual(sleep.call_count, len(store_module._REPLACE_RETRY_DELAYS))
 
 
 if __name__ == "__main__":

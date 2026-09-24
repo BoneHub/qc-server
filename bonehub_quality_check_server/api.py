@@ -1,4 +1,4 @@
-"""Client-facing REST API, used by the 3D Slicer extension.
+"""Client-facing REST API, used by the 3D Slicer extension and the browser review page.
 
 Every endpoint authenticates with an ``X-API-Key`` header holding a reviewer key issued
 from the admin panel. The flow a client follows is:
@@ -9,7 +9,11 @@ from the admin panel. The flow a client follows is:
 4. ``GET  /api/v1/assignments/{id}/segmentation`` - download the segmentation, if any
 5. ``POST /api/v1/assignments/{id}/submit``       - send the verdict back
 
-Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways.
+Segmentations travel in BoneHub's own format, ``.seg.nrrd``, both ways. A client that only
+looks, like the review page, confirms with ``use_stored_segmentation`` instead of uploading.
+
+What a reviewer is sent of a subject follows their account's ``data_access``: a file left
+out is missing from the handout and refused at its download endpoint.
 """
 
 from __future__ import annotations
@@ -23,7 +27,15 @@ from fastapi.responses import FileResponse
 from bonehub_data_schema import SEGMENTATION_SUFFIX, VALID_LABEL_VALUES, __version__ as SCHEMA_VERSION
 
 from .config import STATUS_REVIEWED
-from .models import Assignment, SubjectHandout, SubmissionRequest, SubmissionResult, User
+from .models import (
+    DATA_ACCESS_DESCRIPTIONS,
+    Assignment,
+    HandoutSegment,
+    SubjectHandout,
+    SubmissionRequest,
+    SubmissionResult,
+    User,
+)
 from .store import LABEL_NAME_TO_VALUE, QCError, QCStore
 
 router = APIRouter(prefix="/api/v1", tags=["client"])
@@ -52,7 +64,9 @@ def ping(request: Request, user: User = Depends(get_user)) -> dict:
         "schema_version": SCHEMA_VERSION,
         "user": user.name,
         "allowed_dataset_ids": user.allowed_dataset_ids,
+        "data_access": user.data_access,
         "confirmed_label_status": STATUS_REVIEWED,
+        "mark_removed_labels_absent": store.config.mark_removed_labels_absent,
         "lease_ttl_seconds": store.config.lease_ttl_seconds,
         "max_concurrent_assignments": store.config.max_concurrent_assignments_per_user,
     }
@@ -79,7 +93,7 @@ def next_subject(request: Request, user: User = Depends(get_user)) -> SubjectHan
     ask for the next subject again.
     """
     store = get_store(request)
-    return _handout(store, store.next_subject(user))
+    return _handout(store, store.next_subject(user), user)
 
 
 @router.get("/assignments", response_model=list[Assignment])
@@ -90,13 +104,14 @@ def my_assignments(request: Request, user: User = Depends(get_user)) -> list[Ass
 @router.get("/assignments/{assignment_id}", response_model=SubjectHandout)
 def assignment_detail(assignment_id: str, request: Request, user: User = Depends(get_user)) -> SubjectHandout:
     store = get_store(request)
-    return _handout(store, store.get_assignment(assignment_id, user))
+    return _handout(store, store.get_assignment(assignment_id, user), user)
 
 
 @router.get("/assignments/{assignment_id}/image")
 def download_image(assignment_id: str, request: Request, user: User = Depends(get_user)) -> FileResponse:
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
+    _require_sent(user, "image", user.receives_image)
     path = store.image_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"The image for {assignment.subject_key} is missing on the server.", status_code=404)
@@ -108,6 +123,7 @@ def download_segmentation(assignment_id: str, request: Request, user: User = Dep
     """The stored segmentation, as the dataset keeps it (``.seg.nrrd``)."""
     store = get_store(request)
     assignment = store.get_assignment(assignment_id, user)
+    _require_sent(user, "segmentation", user.receives_segmentation)
     path = store.segmentation_path(assignment.dataset_id, assignment.subject_id)
     if not path.exists():
         raise QCError(f"Subject {assignment.subject_key} has no segmentation yet.", status_code=404)
@@ -140,7 +156,9 @@ async def submit(
 
     ``quality_check_confirmed=true`` stores the uploaded segmentation and sets the reviewed
     labels in ``Subject_info_XXX.json`` to status 2, "available, reviewed and corrected".
-    ``false`` leaves the dataset untouched and only writes the audit trail.
+    With ``use_stored_segmentation`` and no file, the stored segmentation is confirmed as it
+    is and left untouched. ``false`` leaves the dataset untouched and only writes the audit
+    trail.
     """
     store = get_store(request)
 
@@ -162,6 +180,7 @@ async def submit(
             segmentation_tmp_path=tmp_path,
             confirmed_labels=payload.confirmed_labels,
             comment=payload.comment,
+            use_stored_segmentation=payload.use_stored_segmentation,
         )
     finally:
         # The dataset receives a rewritten copy, so the upload itself is never kept.
@@ -182,26 +201,51 @@ async def submit(
 
 
 # --------------------------------------------------------------------- helpers
-def _handout(store: QCStore, assignment: Assignment) -> SubjectHandout:
-    subject = store.subject_info(assignment.dataset_id, assignment.subject_id)
+def _handout(store: QCStore, assignment: Assignment, user: User) -> SubjectHandout:
+    dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
+    subject = store.subject_info(dataset_id, subject_id)
     segmentation_labels = dict(subject.segmentation or {})
-    has_segmentation = store.segmentation_path(assignment.dataset_id, assignment.subject_id).exists()
+    # Only what this reviewer is sent is offered; the download endpoints refuse the rest.
+    has_image = user.receives_image and store.image_path(dataset_id, subject_id).exists()
+    has_segmentation = user.receives_segmentation and store.segmentation_path(dataset_id, subject_id).exists()
+    segments = store.segment_table(dataset_id, subject_id) if has_segmentation else []
+    issue = store.stored_segmentation_issue(dataset_id, subject_id) if has_segmentation else None
     base = f"/api/v1/assignments/{assignment.assignment_id}"
     return SubjectHandout(
         assignment_id=assignment.assignment_id,
-        dataset_id=assignment.dataset_id,
-        subject_id=assignment.subject_id,
+        dataset_id=dataset_id,
+        subject_id=subject_id,
         subject_key=assignment.subject_key,
         expires_at=assignment.expires_at,
-        has_image=store.image_path(assignment.dataset_id, assignment.subject_id).exists(),
+        data_access=user.data_access,
+        has_image=has_image,
         has_segmentation=has_segmentation,
         segmentation_labels=segmentation_labels,
         label_values={name: LABEL_NAME_TO_VALUE[name] for name in segmentation_labels if name in LABEL_NAME_TO_VALUE},
+        segments=[
+            HandoutSegment(
+                number=segment.number,
+                label=segment.label,
+                value=segment.value,
+                color=list(segment.color),
+                extent=list(segment.extent) if segment.extent else None,
+            )
+            for segment in segments
+        ],
+        stored_segmentation_issue=issue,
         subject_info=subject.sorted_dict(),
-        dataset_info=store.dataset_info(assignment.dataset_id),
-        image_url=f"{base}/image",
+        dataset_info=store.dataset_info(dataset_id),
+        image_url=f"{base}/image" if has_image else None,
         segmentation_url=f"{base}/segmentation" if has_segmentation else None,
     )
+
+
+def _require_sent(user: User, what: str, sent: bool) -> None:
+    if not sent:
+        raise QCError(
+            f"'{user.name}' is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}, so the {what} is not sent.",
+            status_code=403,
+        )
 
 
 async def _spool_upload(store: QCStore, upload: UploadFile) -> Path:

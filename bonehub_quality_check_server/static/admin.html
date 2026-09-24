@@ -123,6 +123,7 @@
       in <code>.env</code> sets it. The key is kept inside the container; print it again with
       <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
     </p>
+    <p class="muted" style="margin-bottom:0">Reviewing subjects? Open the <a href="/review">review page</a> instead.</p>
   </section>
 
   <!-- ------------------------------------------------------------- panel -->
@@ -157,6 +158,15 @@
           <input id="newDatasets" placeholder="1,3,10 — blank means all" style="width:100%">
         </div>
         <div>
+          <label for="newAccess">Sent to the reviewer</label>
+          <select id="newAccess" style="width:100%"
+                  title="What the reviewer is sent of each subject. A file they are not sent is refused to them.">
+            <option value="image_and_segmentation">Image + segmentation</option>
+            <option value="segmentation">Segmentation only</option>
+            <option value="image">Image only</option>
+          </select>
+        </div>
+        <div>
           <label for="newNote">Note (optional)</label>
           <input id="newNote" placeholder="radiology resident" style="width:100%">
         </div>
@@ -165,8 +175,14 @@
       <div id="newKeyBox" class="keybox" hidden>
         <strong>API key for <span id="newKeyName"></span></strong>
         <div class="k" id="newKeyValue"></div>
+        <div class="row" style="margin-top:8px">
+          <button id="copyKeyBtn">Copy key</button>
+          <button id="copyInviteBtn">Copy invite link</button>
+        </div>
+        <div class="k muted" id="newInviteValue" style="margin-top:8px"></div>
         <p class="muted" style="margin:8px 0 0">
-          Shown once only. Copy it now and give it to the reviewer for the 3D Slicer extension.
+          Shown once only. The reviewer enters the key in the 3D Slicer extension, or opens the invite
+          link to review in the browser. The link carries the key, so send it privately.
         </p>
       </div>
     </section>
@@ -176,7 +192,7 @@
       <div class="scroll"><table>
         <thead><tr>
           <th>Name</th><th>Key</th><th>Status</th><th class="right">Open</th>
-          <th class="right">Confirmed</th><th class="right">Rejected</th><th>Datasets</th><th>Note</th><th></th>
+          <th class="right">Confirmed</th><th class="right">Rejected</th><th>Sent</th><th>Datasets</th><th>Note</th><th></th>
         </tr></thead>
         <tbody id="usersBody"></tbody>
       </table></div>
@@ -255,6 +271,13 @@
 
   var KEY_STORAGE = "bonehub_qc_admin_key";
   var adminKey = null;
+
+  // What a reviewer is sent of each subject (User.data_access on the server).
+  var ACCESS_OPTIONS = [
+    ["image_and_segmentation", "Image + segmentation"],
+    ["segmentation", "Segmentation only"],
+    ["image", "Image only"]
+  ];
 
   var $ = function (id) { return document.getElementById(id); };
 
@@ -355,9 +378,17 @@
       "Indexed " + shortTime(stats.index_built_at) + (perDataset ? " — " + perDataset : "");
   }
 
+  function accessSelect(user) {
+    return '<select data-act="access" data-name="' + esc(user.name) + '" aria-label="What ' + esc(user.name) +
+      ' is sent">' + ACCESS_OPTIONS.map(function (option) {
+        return '<option value="' + option[0] + '"' + (user.data_access === option[0] ? " selected" : "") + ">" +
+          esc(option[1]) + "</option>";
+      }).join("") + "</select>";
+  }
+
   function renderUsers(users) {
     if (!users.length) {
-      $("usersBody").innerHTML = '<tr><td colspan="9" class="muted">No reviewers yet.</td></tr>';
+      $("usersBody").innerHTML = '<tr><td colspan="10" class="muted">No reviewers yet.</td></tr>';
       return;
     }
     $("usersBody").innerHTML = users.map(function (u) {
@@ -370,6 +401,7 @@
         '<td class="right">' + esc(u.open) + "</td>" +
         '<td class="right">' + esc(u.confirmed) + "</td>" +
         '<td class="right">' + esc(u.rejected) + "</td>" +
+        "<td>" + accessSelect(u) + "</td>" +
         "<td>" + esc(datasets) + "</td>" +
         '<td class="muted">' + esc(u.note) + "</td>" +
         '<td class="nowrap right">' +
@@ -410,7 +442,8 @@
       var detail = "";
       if (e.kind === "submission") {
         detail = e.quality_check_confirmed
-          ? "confirmed → " + Object.keys(e.updated_labels || {}).join(", ")
+          ? (e.use_stored_segmentation ? "confirmed as stored → " : "confirmed → ") +
+            Object.keys(e.updated_labels || {}).join(", ")
           : "rejected, dataset unchanged";
         if (e.comment) { detail += " — " + e.comment; }
       } else if (e.kind === "assigned") {
@@ -458,22 +491,60 @@
       .then(renderStats)["catch"](function (err) { showError(err.message); });
   });
 
+  // The key goes after '#', which browsers never send to the server, so it stays out of logs.
+  function inviteLink(apiKey) {
+    return window.location.origin + "/review#key=" + encodeURIComponent(apiKey);
+  }
+
+  function showKey(name, apiKey) {
+    $("newKeyName").textContent = name;
+    $("newKeyValue").textContent = apiKey;
+    $("newInviteValue").textContent = inviteLink(apiKey);
+    $("newKeyBox").hidden = false;
+  }
+
+  function copyText(text, button) {
+    var done = function () {
+      var label = button.textContent;
+      button.textContent = "Copied";
+      window.setTimeout(function () { button.textContent = label; }, 1500);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function () { showError("Copying failed; select the text instead."); });
+    } else {
+      showError("The browser allows copying only over HTTPS or on localhost; select the text instead.");
+    }
+  }
+
+  $("copyKeyBtn").addEventListener("click", function () { copyText($("newKeyValue").textContent, $("copyKeyBtn")); });
+  $("copyInviteBtn").addEventListener("click", function () {
+    copyText($("newInviteValue").textContent, $("copyInviteBtn"));
+  });
+
   $("createBtn").addEventListener("click", function () {
     var name = $("newName").value.trim();
     if (!name) { showError("A reviewer name is required."); return; }
     api("POST", "/admin/api/users", {
       name: name,
       allowed_dataset_ids: $("newDatasets").value.trim(),
+      data_access: $("newAccess").value,
       note: $("newNote").value.trim()
     }).then(function (result) {
-      $("newKeyName").textContent = result.user.name;
-      $("newKeyValue").textContent = result.api_key;
-      $("newKeyBox").hidden = false;
+      showKey(result.user.name, result.api_key);
       $("newName").value = "";
       $("newDatasets").value = "";
+      $("newAccess").value = "image_and_segmentation";
       $("newNote").value = "";
       return refreshAll();
     })["catch"](function (err) { showError(err.message); });
+  });
+
+  $("usersBody").addEventListener("change", function (event) {
+    var select = event.target.closest('select[data-act="access"]');
+    if (!select) { return; }
+    api("PATCH", "/admin/api/users/" + encodeURIComponent(select.getAttribute("data-name")),
+        { data_access: select.value })
+      .then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
   });
 
   $("usersBody").addEventListener("click", function (event) {
@@ -486,9 +557,7 @@
       if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
       api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
         .then(function (result) {
-          $("newKeyName").textContent = result.name;
-          $("newKeyValue").textContent = result.api_key;
-          $("newKeyBox").hidden = false;
+          showKey(result.name, result.api_key);
           return refreshAll();
         })["catch"](function (err) { showError(err.message); });
     } else if (act === "toggle") {

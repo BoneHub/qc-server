@@ -11,6 +11,18 @@ AssignmentState = Literal["assigned", "confirmed", "rejected", "released", "expi
 #: States in which a subject is finished and is never handed out again.
 TERMINAL_STATES: set[str] = {"confirmed"}
 
+#: What a reviewer is sent of each subject. A file a reviewer is not sent is left out of
+#: the handout and refused at its download endpoint.
+DataAccess = Literal["image_and_segmentation", "segmentation", "image"]
+
+DEFAULT_DATA_ACCESS: DataAccess = "image_and_segmentation"
+
+DATA_ACCESS_DESCRIPTIONS: dict[str, str] = {
+    "image_and_segmentation": "the image and its segmentation",
+    "segmentation": "the segmentation only",
+    "image": "the image only",
+}
+
 
 class User(BaseModel):
     """A reviewer. The API key itself is never stored, only its HMAC digest."""
@@ -23,9 +35,24 @@ class User(BaseModel):
     allowed_dataset_ids: list[int] | None = Field(
         None, description="Restrict this reviewer to these dataset ids. None means every dataset the server serves."
     )
+    data_access: DataAccess = Field(
+        DEFAULT_DATA_ACCESS,
+        description=(
+            "What this reviewer is sent of each subject: 'image_and_segmentation', 'segmentation' "
+            "(the segmentation only) or 'image' (the image only)."
+        ),
+    )
     note: str = Field("", description="Free-form note for the administrator")
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    @property
+    def receives_image(self) -> bool:
+        return self.data_access != "segmentation"
+
+    @property
+    def receives_segmentation(self) -> bool:
+        return self.data_access != "image"
 
     def public_dict(self) -> dict:
         """Everything about the user except the key digest."""
@@ -54,14 +81,35 @@ class Assignment(BaseModel):
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
 
 
+class HandoutSegment(BaseModel):
+    """One segment of the stored segmentation, as its file header describes it."""
+
+    number: int = Field(..., description="The segment number its voxels hold in the .seg.nrrd")
+    label: str = Field(..., description="BoneLabelMap name")
+    value: int = Field(..., description="BoneLabelMap value")
+    color: list[float] = Field(..., description="RGB in 0..1, the colour the file gives the segment")
+    extent: list[int] | None = Field(
+        None,
+        description=(
+            "Bounding box in voxel indices of the file, [i_min, i_max, j_min, j_max, k_min, k_max], "
+            "or None when the header does not record it"
+        ),
+    )
+
+
 class SubjectHandout(BaseModel):
-    """What a client receives when it asks for the next subject."""
+    """What a client receives when it asks for the next subject.
+
+    ``has_image`` and ``has_segmentation`` say whether there is a file for this reviewer to
+    download: the server has it and the reviewer's ``data_access`` includes it.
+    """
 
     assignment_id: str
     dataset_id: int
     subject_id: int
     subject_key: str
     expires_at: str
+    data_access: DataAccess = Field(DEFAULT_DATA_ACCESS, description="What this reviewer is sent of each subject")
     has_image: bool
     has_segmentation: bool
     segmentation_labels: dict[str, int] = Field(
@@ -70,9 +118,21 @@ class SubjectHandout(BaseModel):
     label_values: dict[str, int] = Field(
         default_factory=dict, description="Label name -> BoneLabelMap voxel value, for the labels of this subject"
     )
+    segments: list[HandoutSegment] = Field(
+        default_factory=list,
+        description="The segments of the stored segmentation, read from its header; empty unless has_segmentation",
+    )
+    stored_segmentation_issue: str | None = Field(
+        None,
+        description=(
+            "Why the stored segmentation cannot be confirmed as it is (use_stored_segmentation), for "
+            "instance because it is not on its image's voxel grid; None when it can. Only given with "
+            "has_segmentation."
+        ),
+    )
     subject_info: dict = Field(default_factory=dict, description="The subject's entry from Subject_info_XXX.json")
     dataset_info: dict = Field(default_factory=dict, description="The dataset's Dataset_info_XXX.json")
-    image_url: str
+    image_url: str | None = None
     segmentation_url: str | None = None
 
 
@@ -83,8 +143,16 @@ class SubmissionRequest(BaseModel):
     confirmed_labels: list[str] | None = Field(
         None,
         description=(
-            "Labels the reviewer vouches for. Defaults to every label found in the uploaded segmentation. "
+            "Labels the reviewer vouches for. Defaults to every label found in the confirmed segmentation. "
             "Ignored when quality_check_confirmed is false."
+        ),
+    )
+    use_stored_segmentation: bool = Field(
+        False,
+        description=(
+            "Confirm the segmentation the server already holds, as it is, instead of uploading one. "
+            "For clients that only look, such as the browser review page. Ignored when "
+            "quality_check_confirmed is false."
         ),
     )
     comment: str | None = Field(None, description="Free-form reviewer comment, kept in the audit log")

@@ -4,12 +4,14 @@ Server side of a client–server setup for human-in-the-loop quality check of se
 in the [BoneHub Dataset](https://github.com/BoneHub/BoneHub-Dataset).
 
 It points at a folder that is already in BoneHub data structure format, hands subjects out
-one at a time to authenticated reviewers working in 3D Slicer, and receives the reviewed
-segmentations back. When a reviewer confirms a subject, the uploaded segmentation replaces
-the one in the dataset and the labels the reviewer vouches for are set to status `2`
-("available, reviewed and corrected") in `Subject_info_XXX.json`, whatever status they
-had before. Rejected subjects leave the dataset untouched and are only recorded in the
-audit trail.
+one at a time to authenticated reviewers, and receives their verdicts back. Reviewers work
+either in the browser, on the server's own [review page](#reviewing-in-the-browser), which
+needs no installation but cannot edit, or in 3D Slicer with the BoneHub extension, where they
+can correct the segmentation. When a reviewer confirms a subject, the labels they vouch for
+are set to status `2` ("available, reviewed and corrected") in `Subject_info_XXX.json`,
+whatever status they had before, and a corrected segmentation from 3D Slicer replaces the
+one in the dataset. Rejected subjects leave the dataset untouched and are only recorded in
+the audit trail.
 
 The server runs in Docker; there is no other supported way to run it.
 
@@ -17,7 +19,11 @@ The server runs in Docker; there is no other supported way to run it.
 
 - Leased assignments: a reviewer holds a subject for a limited time, after which it returns
   to the queue automatically.
-- Per-reviewer API keys, optionally restricted to specific dataset ids.
+- Per-reviewer API keys, optionally restricted to specific dataset ids, and a per-reviewer
+  choice of what they are sent of each subject: the image and its segmentation, the
+  segmentation only, or the image only.
+- Browser review page at `/review`: a reviewer opens a link, looks at the subject in 3D and
+  in slices, and confirms or rejects it. Everything is rendered in the reviewer's browser.
 - Browser admin panel at `/admin` for reviewers, queue statistics, submissions and config.
 - Validation of every upload (BoneHub `.seg.nrrd` format, every segment a BoneHub label,
   geometry match against the subject's image, size cap). The dataset receives the upload
@@ -45,7 +51,8 @@ docker compose up -d --build
 docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
 ```
 
-Open `http://<host>:8000/admin` and log in with that key.
+Open `http://<host>:8000/admin` and log in with that key. Reviewers use
+`http://<host>:8000/review`.
 
 The dataset is mounted over SMB, configured by four values in `.env`:
 
@@ -102,13 +109,30 @@ From the admin panel, or with the server's command line inside the running conta
 ```bash
 docker compose exec bonehub-qc-server bonehub-qc-server add-user --name alice
 docker compose exec bonehub-qc-server bonehub-qc-server add-user --name bob --datasets 1,2
+docker compose exec bonehub-qc-server bonehub-qc-server add-user --name carol --data-access segmentation
 docker compose exec bonehub-qc-server bonehub-qc-server list-users
 docker compose exec bonehub-qc-server bonehub-qc-server rotate-key --name alice
 ```
 
-The reviewer API key is shown once, at creation. Hand it to the reviewer together with the
-server URL; they enter both in the 3D Slicer extension. The running server sees a reviewer
-added this way at once.
+The reviewer API key is shown once, at creation. The admin panel shows it together with an
+**invite link**, `http://<host>:8000/review#key=bhqc_...`, which signs the reviewer in to
+the review page by itself. The part after `#` never reaches the server, so the key stays out
+of its logs; the link is the credential all the same, so send it privately. For 3D Slicer,
+hand over the key and the server URL, which the reviewer enters in the extension. The
+running server sees a reviewer added from the command line at once.
+
+**What a reviewer is sent** is set per reviewer when creating them, and can be changed in the
+Reviewers table at any time (`--data-access` on the command line):
+
+| Setting | Sent | They can |
+| --- | --- | --- |
+| Image + segmentation (default) | both | review, confirm, reject; correct in 3D Slicer |
+| Segmentation only | the segmentation | review the labels without the image, confirm, reject. Not given subjects without a segmentation. Cannot open subjects in 3D Slicer, which needs the image |
+| Image only | the image | reject with a comment, or release. Cannot confirm or replace a segmentation they have not seen, so in 3D Slicer they can only create one for a subject that has none |
+
+A file a reviewer is not sent is left out of their handout and refused at its download
+endpoint, whichever client asks. Every verdict records the reviewer's setting in the audit
+trail.
 
 ### Other commands
 
@@ -123,10 +147,64 @@ Endpoints:
 
 | URL | What it is |
 | --- | --- |
+| `/review` | Review page (asks for a reviewer's API key) |
 | `/admin` | Admin panel (asks for the admin key) |
 | `/docs` | Interactive OpenAPI documentation |
 | `/health` | Unauthenticated liveness probe |
 | `/api/v1/...` | Client API, authenticated with `X-API-Key` |
+| `/static/...` | The pages' script and the vendored NiiVue viewer |
+
+## Reviewing in the browser
+
+The review page at `/review` is for reviewers who only need to look: nothing to install, and
+all rendering happens in the reviewer's browser with [NiiVue](https://github.com/niivue/niivue),
+so the server only sends files. A reviewer:
+
+1. opens the invite link, or `/review` and enters their key. "Remember" keeps the key in this
+   browser; otherwise it is forgotten when the tab closes;
+2. presses **Get next subject**. A subject they already hold, for instance after closing the
+   tab, is opened again by itself;
+3. looks at it. The 3D view renders the labels, and the slices show the image with the labels
+   over it. Clicking a label in the list moves the crosshair onto that bone, the eye hides it,
+   and the target shows it alone. **Outline**, **Distinct colours** (neighbouring bones in
+   clearly different colours, instead of the dataset's own), a CT window and a single-plane
+   view help with the details;
+4. ticks the labels they vouch for, writes a comment if something is worth recording, and
+   presses **Confirm**, **Reject** or **Release**.
+
+The page cannot edit. **Confirm** vouches for the stored segmentation as it is: the ticked
+labels are set to `2`, and the file is left untouched (`use_stored_segmentation` in the API).
+A rejection records the verdict and comment, and changes nothing. Corrections are made in 3D
+Slicer.
+
+A stored segmentation that is not on its image's voxel grid cannot be confirmed as it is.
+The server holds it to the same geometry check as an upload (`require_geometry_match`), so
+the page says so and offers Reject instead. Correcting the subject in 3D Slicer writes the
+segmentation back on the image's grid.
+
+**Large scans.** The browser needs several copies of a volume in GPU memory, and in testing a
+450-million-voxel whole-body CT would not display at full resolution. The page therefore
+shows at most 256 million voxels in the slices, and 64 million in the 3D view, by leaving out
+every second voxel along the finest axes (for example 0.6 mm slices shown at 1.2 mm). It says
+so above the labels, and adds a note to the comment of a verdict given on such a view. On
+the machine it was tested on, a 150–450-million-voxel CT took 15–25 seconds to open once
+downloaded, and 1.5–3 GB of browser memory; a small scan opens in a few seconds.
+
+**Browsers.** A current Chrome, Edge, Firefox or Safari with WebGL 2. Use HTTPS in front of
+the server when reviewers connect over anything but a trusted network: the API key and the
+images travel in every request.
+
+NiiVue is vendored as one self-contained file in
+`bonehub_quality_check_server/static/vendor/` (BSD-2-Clause; its license is next to it), so
+the page works on networks that cannot reach a CDN. To update it:
+
+```bash
+python tools/update_niivue.py 0.69.0     # downloads, checks and unpacks that version
+```
+
+then point the import at the top of `static/review.js` at the new file, delete the old one,
+and run the tests. The page uses one NiiVue internal (`refreshLayers`), so check it after an
+update.
 
 ## Where the server keeps things
 
@@ -183,7 +261,8 @@ The server follows [BoneHub data schema](https://github.com/BoneHub/BoneHub-Data
   skipped, with the reason in `server.log`; regenerate it with the current converters. The
   server itself refuses to start if the installed `bonehub_data_schema` is not 0.3.x.
 
-What a confirmed submission does to each label:
+What a confirmed submission does to each label. For a confirmation of the stored
+segmentation as it is, read "the stored segmentation" for "the upload":
 
 | Label | New status |
 | --- | --- |
@@ -208,14 +287,23 @@ The new server reads none of those files:
 
 ## Client flow
 
-Reviewers use the 3D Slicer extension, which follows this sequence:
+The 3D Slicer extension and the review page follow the same sequence:
 
-1. `GET /api/v1/ping` — check the key; reports the server's `schema_version`
+1. `GET /api/v1/ping` — check the key; reports the server's `schema_version` and the
+   reviewer's `data_access`
 2. `GET /api/v1/labels` — the label map and label statuses
 3. `POST /api/v1/subjects/next` — lease the next subject
 4. `GET /api/v1/assignments/{id}/image` — download the image (`.nii.gz`)
 5. `GET /api/v1/assignments/{id}/segmentation` — download the segmentation (`.seg.nrrd`), if any
-6. `POST /api/v1/assignments/{id}/submit` — send the verdict back, with the reviewed `.seg.nrrd`
+6. `POST /api/v1/assignments/{id}/submit` — send the verdict back, with the reviewed `.seg.nrrd`,
+   or with `use_stored_segmentation: true` in the metadata to confirm the stored one as it is
+
+The handout says what there is for this reviewer to download (`has_image`,
+`has_segmentation`, and a URL for each), which follows their `data_access`. With the
+segmentation it also carries `segments`, read from the file header: each segment's number,
+BoneHub label and value, colour and bounding box. It also carries
+`stored_segmentation_issue`: why the stored segmentation could not be confirmed as it is, if
+there is a reason.
 
 [`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client
 for the same API; it is the file shipped inside the Slicer extension:
@@ -286,6 +374,9 @@ To run one module or one test, replace the last command, for example with
 | `test_queue.py` | Which subjects are queued, schema versions, restricting the server to specific datasets, broken dataset folders |
 | `test_assignment.py` | Who gets which subject, leases, expiry, release, requeue policy |
 | `test_submission.py` | Confirmed submissions marking labels reviewed (2), the `.seg.nrrd` format and its validation, rejections changing nothing, partial uploads, audit trail |
+| `test_confirm_as_is.py` | Confirming the stored segmentation as it is, the geometry check on it, and who may confirm or replace a segmentation |
+| `test_data_access.py` | What a reviewer is sent of each subject, in the handout, the downloads, the queue, the admin panel and the CLI |
+| `test_review_page.py` | The review page's files, what is installed with the package, the vendored NiiVue build, and the segment table in the handout |
 | `test_api.py` | The REST API over HTTP, as the 3D Slicer extension calls it |
 | `test_admin.py` | The admin panel endpoints behind the admin key |
 | `test_client.py` | `client.py` against a real uvicorn server on a real socket |

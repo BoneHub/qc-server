@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BoneHub Quality Check &middot; Review</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --border: #dcdfe4;
+    --text: #16191d;
+    --muted: #666d78;
+    --accent: #1e6bb8;
+    --accent-text: #ffffff;
+    --danger: #b3261e;
+    --ok: #1b7f4b;
+    --warn: #8a6100;
+    --code-bg: #f0f2f5;
+    --row-hover: #eef1f5;
+    --viewer-bg: #0b0c0e;
+    --viewer-text: #c9ced6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c;
+      --panel: #1e2126;
+      --border: #343941;
+      --text: #e6e8ea;
+      --muted: #99a1ad;
+      --accent: #4c9be8;
+      --accent-text: #0d1117;
+      --danger: #f2837c;
+      --ok: #63cd98;
+      --warn: #e0b24d;
+      --code-bg: #262a30;
+      --row-hover: #262a31;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  [hidden] { display: none !important; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 12px; margin: 0; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; }
+  button {
+    font: inherit;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button.danger { color: var(--danger); }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  button:disabled { opacity: .5; cursor: default; }
+  input, select, textarea {
+    font: inherit;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    min-width: 0;
+  }
+  textarea { width: 100%; resize: vertical; min-height: 64px; }
+  label.field { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .muted { color: var(--muted); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .banner { padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); margin: 8px 0 0; font-size: 13px; }
+  .banner.err { color: var(--danger); border-color: var(--danger); }
+  .banner.ok { color: var(--ok); border-color: var(--ok); }
+  .banner.note { color: var(--warn); border-color: var(--warn); }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); white-space: nowrap; }
+
+  /* ---------------------------------------------------------------- sign in */
+  #login { max-width: 440px; margin: 60px auto; padding: 0 16px; }
+  #login .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 20px; }
+  #login .row { display: flex; gap: 8px; }
+  #login .row input { flex: 1; }
+  #login p { margin: 12px 0 0; }
+
+  /* -------------------------------------------------------------- app shell */
+  #app { height: 100%; display: flex; flex-direction: column; }
+  .topbar {
+    display: flex; align-items: center; gap: 12px; padding: 8px 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .topbar .brand { font-weight: 600; }
+  .topbar .spacer { flex: 1; }
+  .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
+
+  /* ----------------------------------------------------------------- viewer */
+  .viewer { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--viewer-bg); color: var(--viewer-text); }
+  .toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 6px 10px;
+    border-bottom: 1px solid #23262b; font-size: 12px;
+  }
+  .toolbar button, .toolbar select {
+    background: #1b1d21; color: var(--viewer-text); border-color: #33373e; padding: 3px 9px; font-size: 12px;
+  }
+  .toolbar button[aria-pressed="true"] { background: #2a3f57; border-color: #4c9be8; color: #fff; }
+  .toolbar .group { display: flex; align-items: center; gap: 4px; }
+  .toolbar .seg { display: inline-flex; }
+  .toolbar .seg button { border-radius: 0; margin-left: -1px; }
+  .toolbar .seg button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+  .toolbar .seg button:last-child { border-radius: 0 6px 6px 0; }
+  .toolbar input[type=range] { width: 90px; accent-color: #4c9be8; }
+  .views { position: relative; flex: 1; min-height: 0; display: grid; gap: 2px; grid-template-columns: 1fr 1fr; }
+  .views[data-layout="3d"] { grid-template-columns: 1fr; }
+  .views[data-layout="3d"] #view2dBox { display: none; }
+  .views[data-layout="slices"] { grid-template-columns: 1fr; }
+  .views[data-layout="slices"] #view3dBox { display: none; }
+  .view { position: relative; min-width: 0; min-height: 0; background: #000; }
+  .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; outline: none; }
+  .view-tag {
+    position: absolute; left: 8px; top: 6px; font-size: 11px; color: #8d949e;
+    pointer-events: none; text-transform: uppercase; letter-spacing: .05em;
+  }
+  .overlay {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--viewer-bg); z-index: 2; padding: 24px; text-align: center;
+  }
+  .overlay .box { max-width: 460px; }
+  .overlay h1 { color: #e6e8ea; }
+  .progress { height: 6px; background: #23262b; border-radius: 3px; overflow: hidden; margin: 14px 0 8px; }
+  .progress > div { height: 100%; width: 0; background: #4c9be8; transition: width .15s; }
+  .progress.indeterminate > div { width: 30%; animation: slide 1.1s infinite ease-in-out; }
+  @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  .held { margin-top: 18px; text-align: left; }
+  .held button { margin: 4px 6px 0 0; }
+  .statusline {
+    min-height: 26px; padding: 4px 10px; font-size: 12px; border-top: 1px solid #23262b;
+    display: flex; gap: 16px; flex-wrap: wrap; align-items: center;
+  }
+  .statusline .hint { color: #7b828c; margin-left: auto; }
+
+  /* ---------------------------------------------------------------- sidebar */
+  .sidebar { overflow-y: auto; border-left: 1px solid var(--border); background: var(--bg); padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  .card-head h2 { flex: 1; }
+  .subject-key { font-size: 18px; font-weight: 600; }
+  .facts { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+  .facts div { margin-top: 2px; }
+  .lease { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 12px; }
+  .lease span { flex: 1; }
+
+  .labels { display: flex; flex-direction: column; }
+  .lrow {
+    display: grid; grid-template-columns: 18px 12px minmax(0, 1fr) auto 26px 26px;
+    align-items: center; gap: 6px; padding: 3px 4px; border-radius: 5px;
+  }
+  .lrow:hover { background: var(--row-hover); }
+  .lrow input { margin: 0; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid rgba(0,0,0,.25); }
+  .lname {
+    border: none; background: none; padding: 1px 0; text-align: left; font-size: 12px;
+    overflow-wrap: anywhere; color: var(--text); border-radius: 3px;
+  }
+  .lname:hover:not(:disabled) { text-decoration: underline; }
+  .lstatus { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .lstatus.reviewed { color: var(--ok); }
+  .icon {
+    width: 24px; height: 24px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+    border-color: transparent; background: transparent; color: var(--muted);
+  }
+  .icon svg { width: 16px; height: 16px; }
+  .icon[aria-pressed="true"] { color: var(--accent); }
+  .lrow.hidden-label .lname, .lrow.hidden-label .swatch { opacity: .35; }
+  .lrow.absent { grid-template-columns: 18px 12px minmax(0, 1fr) auto; }
+  .lrow.absent .lname { font-style: italic; color: var(--muted); cursor: default; }
+  .lrow.absent .lname:hover { text-decoration: none; }
+  .lrow.listed .lname { font-style: normal; color: var(--text); }
+  .labels-foot { font-size: 12px; margin-top: 8px; }
+
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .actions .primary { flex: 1 1 100%; }
+  .actions button:not(.primary) { flex: 1; }
+  .check { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); margin-top: 10px; }
+
+  dialog {
+    border: 1px solid var(--border); border-radius: 10px; padding: 18px; max-width: 480px;
+    background: var(--panel); color: var(--text);
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .45); }
+  dialog h3 { margin: 0 0 8px; font-size: 16px; }
+  dialog .body p { margin: 8px 0; }
+  dialog .body ul { margin: 4px 0 8px; padding-left: 18px; max-height: 160px; overflow-y: auto; font-size: 12px; }
+  dialog .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  @media (max-width: 900px) {
+    .workspace { grid-template-columns: 1fr; grid-template-rows: 62vh auto; overflow-y: auto; }
+    .sidebar { border-left: none; border-top: 1px solid var(--border); overflow: visible; }
+    .views { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    .views[data-layout="3d"], .views[data-layout="slices"] { grid-template-rows: 1fr; }
+    .statusline .hint { display: none; }
+  }
+</style>
+<script type="module" src="/static/review.js"></script>
+</head>
+<body>
+
+<!-- ------------------------------------------------------------------ sign in -->
+<main id="login" hidden>
+  <div class="card">
+    <h1>BoneHub Quality Check</h1>
+    <p class="muted" style="margin-top:0">Sign in with the API key your administrator gave you.</p>
+    <div id="loginError" class="banner err" hidden></div>
+    <label class="field" for="apiKey" style="margin-top:14px">API key</label>
+    <div class="row">
+      <input id="apiKey" type="password" placeholder="bhqc_..." autocomplete="off" spellcheck="false">
+      <button class="primary" id="signInBtn">Sign in</button>
+    </div>
+    <label class="check"><input type="checkbox" id="rememberKey"> Remember the key on this computer</label>
+    <p class="muted" style="font-size:12px">
+      An invite link signs you in by itself. On a shared computer, leave “remember” unticked: the key
+      is then forgotten when you close this tab.
+    </p>
+  </div>
+</main>
+
+<!-- ---------------------------------------------------------------------- app -->
+<div id="app" hidden>
+  <header class="topbar">
+    <span class="brand">BoneHub Quality Check</span>
+    <span class="muted">Review</span>
+    <span class="spacer"></span>
+    <span id="whoName" class="muted"></span>
+    <span id="whoAccess" class="pill"></span>
+    <button class="small" id="signOutBtn">Sign out</button>
+  </header>
+
+  <div class="workspace">
+    <section class="viewer" aria-label="Image viewer">
+      <div class="toolbar" id="toolbar">
+        <div class="group">
+          <span>View</span>
+          <span class="seg" role="group" aria-label="Layout">
+            <button data-layout="both" aria-pressed="true">3D + slices</button>
+            <button data-layout="slices" aria-pressed="false">Slices</button>
+            <button data-layout="3d" aria-pressed="false">3D</button>
+          </span>
+        </div>
+        <div class="group">
+          <label for="plane">Slices</label>
+          <select id="plane" title="Show the three planes, or one of them larger">
+            <option value="multi">All three</option>
+            <option value="axial">Axial</option>
+            <option value="coronal">Coronal</option>
+            <option value="sagittal">Sagittal</option>
+          </select>
+        </div>
+        <div class="group" id="overlayTools">
+          <label for="opacity">Labels on slices</label>
+          <input type="range" id="opacity" min="0" max="100" value="45">
+          <button id="outlineBtn" aria-pressed="false" title="Draw the labels as outlines on the slices">Outline</button>
+        </div>
+        <div class="group" id="windowTools">
+          <label for="windowPreset">Window</label>
+          <select id="windowPreset">
+            <option value="bone">Bone</option>
+            <option value="soft">Soft tissue</option>
+            <option value="auto">Automatic</option>
+          </select>
+        </div>
+        <button id="colorsBtn" aria-pressed="false"
+                title="Give neighbouring labels clearly different colours instead of the dataset's own">Distinct colours</button>
+        <button id="showAllBtn" title="Show every label again">Show all labels</button>
+        <button id="resetViewBtn" title="Recentre the slices and reset the 3D view">Reset view</button>
+      </div>
+
+      <div class="views" id="views" data-layout="both">
+        <div class="view" id="view3dBox"><canvas id="view3d"></canvas><span class="view-tag">3D · labels</span></div>
+        <div class="view" id="view2dBox"><canvas id="view2d"></canvas><span class="view-tag" id="view2dTag">Slices</span></div>
+
+        <div class="overlay" id="emptyState">
+          <div class="box">
+            <h1 id="emptyTitle">Signing in…</h1>
+            <p id="emptyText"></p>
+            <div id="emptyMessage"></div>
+            <p style="margin-top:16px"><button class="primary" id="nextBtn" hidden>Get next subject</button></p>
+            <div class="held" id="heldList" hidden></div>
+          </div>
+        </div>
+
+        <div class="overlay" id="loadingState" hidden>
+          <div class="box" style="width:100%">
+            <div id="loadingTitle">Loading…</div>
+            <div class="progress" id="loadingProgress"><div id="loadingBar"></div></div>
+            <div class="muted" id="loadingDetail" style="font-size:12px"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="statusline" id="statusline">
+        <span id="locLabel"></span>
+        <span id="locValue"></span>
+        <span id="locMM" class="mono"></span>
+        <span class="hint">3D: drag to rotate, scroll to zoom · Slices: click to move the crosshair, scroll through slices, right-drag for contrast</span>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section class="card" id="subjectCard" hidden>
+        <div class="card-head"><h2>Subject</h2></div>
+        <div class="subject-key mono" id="subjectKey"></div>
+        <div class="facts" id="subjectFacts"></div>
+        <div class="lease">
+          <span id="leaseText"></span>
+          <button class="small" id="extendBtn" title="Keep this subject for another lease period">Extend</button>
+        </div>
+        <div id="subjectNotes"></div>
+      </section>
+
+      <section class="card" id="labelsCard" hidden>
+        <div class="card-head">
+          <h2 id="labelsTitle">Labels</h2>
+          <button class="small" id="tickAllBtn">Tick all</button>
+          <button class="small" id="tickNoneBtn">Untick all</button>
+        </div>
+        <div class="labels" id="labelsList"></div>
+        <div class="labels-foot muted" id="labelsFoot"></div>
+      </section>
+
+      <section class="card" id="verdictCard" hidden>
+        <div class="card-head"><h2>Verdict</h2></div>
+        <label class="field" for="comment">Comment</label>
+        <textarea id="comment" placeholder="What is wrong, or anything worth recording" maxlength="4000"></textarea>
+        <div class="actions">
+          <button class="primary" id="confirmBtn">Confirm</button>
+          <button class="danger" id="rejectBtn">Reject</button>
+          <button id="releaseBtn" title="Give the subject back without a verdict">Release</button>
+        </div>
+        <label class="check"><input type="checkbox" id="autoNext"> Open the next subject after submitting</label>
+        <div id="verdictMessage"></div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<dialog id="askDialog">
+  <form method="dialog">
+    <h3 id="askTitle"></h3>
+    <div class="body" id="askBody"></div>
+    <div class="buttons">
+      <button value="cancel" id="askCancel">Cancel</button>
+      <button value="ok" class="primary" id="askOk">OK</button>
+    </div>
+  </form>
+</dialog>
+
+</body>
+</html>

@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import FileResponse
 
-from .models import User
+from .models import DEFAULT_DATA_ACCESS, User
 from .store import UNSET, QCError, QCStore
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -65,7 +65,8 @@ def create_user(payload: dict, store: QCStore = Depends(require_admin)) -> dict:
     name = str(payload.get("name", "")).strip()
     allowed = _parse_dataset_ids(payload.get("allowed_dataset_ids"))
     note = str(payload.get("note", "") or "")
-    user, api_key = store.create_user(name=name, allowed_dataset_ids=allowed, note=note)
+    data_access = str(payload.get("data_access") or DEFAULT_DATA_ACCESS)
+    user, api_key = store.create_user(name=name, allowed_dataset_ids=allowed, note=note, data_access=data_access)
     return {
         "user": user.public_dict(),
         "api_key": api_key,
@@ -78,7 +79,13 @@ def update_user(name: str, payload: dict, store: QCStore = Depends(require_admin
     """Change a reviewer. A field absent from the body is left exactly as it was."""
     allowed = _parse_dataset_ids(payload["allowed_dataset_ids"]) if "allowed_dataset_ids" in payload else UNSET
     note = payload.get("note")
-    user = store.update_user(name, allowed, None if note is None else str(note))
+    data_access = payload.get("data_access")
+    user = store.update_user(
+        name,
+        allowed,
+        None if note is None else str(note),
+        data_access=None if data_access is None else str(data_access),
+    )
     return user.public_dict()
 
 

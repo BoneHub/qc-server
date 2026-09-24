@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bonehub-dataset-quality-check-server"
 version = "0.2.0"
-description = "Server that distributes BoneHub subjects to 3D Slicer reviewers and writes confirmed segmentations back into the dataset."
+description = "Server that distributes BoneHub subjects to reviewers, in 3D Slicer or in the browser, and writes confirmed segmentations back into the dataset."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -39,6 +39,8 @@ bonehub-qc-server = "bonehub_quality_check_server.__main__:main"
 [tool.setuptools.packages.find]
 include = ["bonehub_quality_check_server*"]
 
+# The admin panel and the review page are served from these files at run time, so they must
+# be installed with the package; tests/test_review_page.py checks nothing under static/ is missed.
 [tool.setuptools.package-data]
-bonehub_quality_check_server = ["static/*.html"]
+bonehub_quality_check_server = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]
 

@@ -7,10 +7,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
 
-from . import __version__, admin, api, auth
+from . import __version__, admin, api, auth, review
 from .config import QCServerConfig, resolve_credentials_dir, resolve_dataset_root, resolve_state_root
 from .store import QCError, QCStore
 
@@ -36,8 +37,8 @@ def create_app(
         title="BoneHub Dataset Quality Check",
         version=__version__,
         description=(
-            "Distributes BoneHub subjects to 3D Slicer reviewers and writes confirmed "
-            "segmentations back into the dataset folder."
+            "Distributes BoneHub subjects to reviewers -- in 3D Slicer or on the browser review "
+            "page -- and writes confirmed segmentations back into the dataset folder."
         ),
     )
     app.state.store = QCStore(
@@ -50,6 +51,8 @@ def create_app(
 
     app.include_router(api.router)
     app.include_router(admin.router)
+    app.include_router(review.router)
+    app.mount("/static", StaticFiles(directory=review.STATIC_DIR), name="static")
 
     @app.exception_handler(QCError)
     async def handle_qc_error(request: Request, exc: QCError) -> JSONResponse:
@@ -91,7 +94,12 @@ def _announce(store: QCStore) -> None:
         f"reviewers    : {len(store.list_users())}",
         f"data schema  : {SCHEMA_VERSION}",
     ]
-    lines = ["BoneHub Dataset Quality Check server", *(f"  {line}" for line in details), "  admin panel  : /admin"]
+    lines = [
+        "BoneHub Dataset Quality Check server",
+        *(f"  {line}" for line in details),
+        "  admin panel  : /admin",
+        "  review page  : /review",
+    ]
 
     if os.environ.get(auth.ENV_ADMIN_KEY):
         lines.append("  admin key    : BONEHUB_QC_ADMIN_KEY from .env")

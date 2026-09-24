@@ -41,6 +41,7 @@ import random
 import shutil
 import socket
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,8 +69,16 @@ from .config import (
     STATUS_REVIEWED,
     QCServerConfig,
 )
-from .models import TERMINAL_STATES, Assignment, QueueStats, User
-from .segmentation import SegmentationError, UploadedSegmentation, read_segmentation_upload, write_segmentation
+from .models import DATA_ACCESS_DESCRIPTIONS, DEFAULT_DATA_ACCESS, TERMINAL_STATES, Assignment, QueueStats, User
+from .segmentation import (
+    SegmentationError,
+    SegmentDescription,
+    UploadedSegmentation,
+    check_stored_geometry,
+    read_segment_table,
+    read_segmentation_upload,
+    write_segmentation,
+)
 
 USERS_FILE_NAME = "users.json"
 ASSIGNMENTS_FILE_NAME = "assignments.json"
@@ -385,7 +394,13 @@ class QCStore:
             user.update(counts.get(user["name"], {"open": 0, "confirmed": 0, "rejected": 0}))
         return sorted(users, key=lambda u: u["name"].lower())
 
-    def create_user(self, name: str, allowed_dataset_ids: list[int] | None = None, note: str = "") -> tuple[User, str]:
+    def create_user(
+        self,
+        name: str,
+        allowed_dataset_ids: list[int] | None = None,
+        note: str = "",
+        data_access: str = DEFAULT_DATA_ACCESS,
+    ) -> tuple[User, str]:
         """Create a reviewer and return the user together with its plaintext API key.
 
         The plaintext key is returned exactly once; only its digest is stored.
@@ -393,6 +408,7 @@ class QCStore:
         name = name.strip()
         if not name:
             raise QCError("A user name is required.")
+        _check_data_access(data_access)
         with self._lock:
             self._refresh_users()
             if name in self._users:
@@ -405,12 +421,15 @@ class QCStore:
                 created_at=utc_now_iso(),
                 active=True,
                 allowed_dataset_ids=allowed_dataset_ids,
+                data_access=data_access,
                 note=note,
             )
             self._users[name] = user
             self._save_users()
         self.audit.record(
-            "user_created", {"user": name, "key_prefix": user.key_prefix}, summary=f"Created user '{name}'."
+            "user_created",
+            {"user": name, "key_prefix": user.key_prefix, "data_access": user.data_access},
+            summary=f"Created user '{name}' (receives {DATA_ACCESS_DESCRIPTIONS[user.data_access]}).",
         )
         return user, api_key
 
@@ -437,21 +456,31 @@ class QCStore:
         )
         return user
 
-    def update_user(self, name: str, allowed_dataset_ids=UNSET, note: str | None = None) -> User:
+    def update_user(
+        self, name: str, allowed_dataset_ids=UNSET, note: str | None = None, data_access: str | None = None
+    ) -> User:
         """Change a reviewer. An argument left out is not touched.
 
         ``allowed_dataset_ids`` takes ``None`` to mean "every dataset the server serves",
         so it needs :data:`UNSET` to tell that apart from "leave the restriction alone" --
         otherwise editing only the note would quietly widen a reviewer's access.
         """
+        if data_access is not None:
+            _check_data_access(data_access)
         with self._lock:
             user = self._require_user(name)
             if allowed_dataset_ids is not UNSET:
                 user.allowed_dataset_ids = allowed_dataset_ids
             if note is not None:
                 user.note = note
+            if data_access is not None:
+                user.data_access = data_access
             self._save_users()
-        self.audit.record("user_updated", {"user": name}, summary=f"Updated user '{name}'.")
+        self.audit.record(
+            "user_updated",
+            {"user": name, "data_access": user.data_access},
+            summary=f"Updated user '{name}' (receives {DATA_ACCESS_DESCRIPTIONS[user.data_access]}).",
+        )
         return user
 
     def delete_user(self, name: str) -> None:
@@ -575,7 +604,12 @@ class QCStore:
                 # that lost its local copy can pick the same work back up.
                 return sorted(open_assignments, key=lambda a: a.assigned_at)[0]
 
-            candidates = [ref for ref in self._index if self._user_may_access(user, ref.dataset_id)]
+            # A reviewer sent the segmentation only has nothing to look at in a subject without one.
+            candidates = [
+                ref
+                for ref in self._index
+                if self._user_may_access(user, ref.dataset_id) and (user.receives_image or ref.has_segmentation)
+            ]
             if self.config.assignment_strategy == "random":
                 random.shuffle(candidates)
             leased_elsewhere = self._leased_by_other_sessions()
@@ -736,6 +770,41 @@ class QCStore:
         _atomic_write_json(path, [subject.sorted_dict() for subject in subjects])
         return target
 
+    def segment_table(self, dataset_id: int, subject_id: int) -> list[SegmentDescription]:
+        """The segments of a subject's stored segmentation, from its header alone.
+
+        Empty when there is no stored segmentation, and when its header cannot be read: a
+        client that downloads the file still gets its handout, and the problem is logged.
+        """
+        path = self.segmentation_path(dataset_id, subject_id)
+        if not path.exists():
+            return []
+        try:
+            return read_segment_table(path)
+        except SegmentationError as exc:
+            self.audit.event(
+                f"The segment table of '{path.name}' could not be read: {exc}", level=logging.WARNING
+            )
+            return []
+
+    def stored_segmentation_issue(self, dataset_id: int, subject_id: int) -> str | None:
+        """Why the stored segmentation cannot be confirmed as it is, or None when it can.
+
+        Checked from the file headers, so a client can be told before a reviewer spends time
+        on a subject whose confirmation the server would refuse.
+        """
+        path = self.segmentation_path(dataset_id, subject_id)
+        image_file = self.image_path(dataset_id, subject_id)
+        if not path.exists():
+            return "There is no stored segmentation."
+        if not self.config.require_geometry_match or not image_file.exists():
+            return None
+        try:
+            check_stored_geometry(path, image_file)
+        except SegmentationError as exc:
+            return str(exc)
+        return None
+
     # ------------------------------------------------------------- submission
     def inspect_segmentation(self, seg_path: Path, dataset_id: int, subject_id: int) -> UploadedSegmentation:
         """Validate an uploaded ``.seg.nrrd``; its ``labels`` are the labels it contains."""
@@ -754,12 +823,18 @@ class QCStore:
         segmentation_tmp_path: Path | None,
         confirmed_labels: list[str] | None = None,
         comment: str | None = None,
+        use_stored_segmentation: bool = False,
     ) -> "SubmissionOutcome":
         """Apply a reviewer's verdict.
 
         ``quality_check_confirmed=False`` changes nothing in the dataset: the segmentation
         file and Subject_info are left exactly as they are, and only the audit trail and
         the assignment state record that the subject was looked at and rejected.
+
+        A confirmation either brings the reviewed segmentation (``segmentation_tmp_path``) or,
+        with ``use_stored_segmentation``, vouches for the stored one as it is, which is then
+        left untouched. Either way it takes a reviewer who was sent the segmentation, when the
+        subject has one: nobody confirms or replaces a segmentation they have not seen.
         """
         assignment = self.get_assignment(assignment_id, user)
         if assignment.state not in {"assigned", "expired"}:
@@ -768,16 +843,49 @@ class QCStore:
         dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
 
         if not quality_check_confirmed:
-            return self._finish_rejected(assignment, comment)
+            return self._finish_rejected(assignment, comment, user)
 
-        if segmentation_tmp_path is None:
-            raise QCError("A confirmed submission must include the reviewed segmentation file.")
+        stored_path = self.segmentation_path(dataset_id, subject_id)
+        if use_stored_segmentation:
+            if segmentation_tmp_path is not None:
+                raise QCError("Send a segmentation file or set use_stored_segmentation, not both.")
+            if not stored_path.exists():
+                raise QCError(
+                    f"Subject {assignment.subject_key} has no segmentation to confirm as it is.", status_code=409
+                )
+        elif segmentation_tmp_path is None:
+            raise QCError(
+                "A confirmed submission must include the reviewed segmentation file, or set "
+                "use_stored_segmentation to confirm the stored one as it is."
+            )
+        if stored_path.exists() and not user.receives_segmentation:
+            raise QCError(
+                f"'{user.name}' is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}, so cannot confirm or replace "
+                f"the segmentation of {assignment.subject_key}, which they have not seen. Reject the subject with "
+                "a comment instead.",
+                status_code=403,
+            )
 
-        # Validation is the expensive part, so it happens before the lock is taken.
-        upload = self.inspect_segmentation(segmentation_tmp_path, dataset_id, subject_id)
+        # Validation is the expensive part, so it happens before the lock is taken. The stored
+        # file is held to the same rules as an upload: vouching for it certifies it just the same.
+        if use_stored_segmentation:
+            try:
+                upload = self.inspect_segmentation(stored_path, dataset_id, subject_id)
+            except QCError as exc:
+                raise QCError(
+                    f"The stored segmentation of {assignment.subject_key} cannot be confirmed as it is. "
+                    f"{exc.message} Correct it in 3D Slicer, which writes it back on the image's voxel grid, "
+                    "or reject the subject with a comment.",
+                    status_code=409,
+                ) from exc
+        else:
+            upload = self.inspect_segmentation(segmentation_tmp_path, dataset_id, subject_id)
         present_labels = upload.labels
         if not present_labels:
-            raise QCError("The uploaded segmentation is empty; there is nothing to confirm.")
+            raise QCError(
+                f"The {'stored' if use_stored_segmentation else 'uploaded'} segmentation is empty; "
+                "there is nothing to confirm."
+            )
 
         if confirmed_labels is None:
             labels_to_confirm = sorted(present_labels)
@@ -787,20 +895,26 @@ class QCStore:
                 raise QCError(f"Unknown label names: {unknown}. See 'bonehub_data_schema/labelmap.py'.")
             missing = [label for label in confirmed_labels if label not in present_labels]
             if missing:
-                raise QCError(f"These confirmed labels are not present in the uploaded segmentation: {missing}.")
+                raise QCError(
+                    f"These confirmed labels are not present in the "
+                    f"{'stored' if use_stored_segmentation else 'uploaded'} segmentation: {missing}."
+                )
             labels_to_confirm = sorted(set(confirmed_labels))
 
         self._require_compatible_dataset(dataset_id)
+        if use_stored_segmentation:
+            return self._finish_confirmed(assignment, None, present_labels, labels_to_confirm, comment, user)
+
         # The dataset gets the canonical form of the upload. Writing it is slow too, so it is
         # staged here and only moved into place under the lock.
         staged_path = self.new_upload_path(prefix="staged")
         try:
             write_segmentation(upload, staged_path)
-            return self._finish_confirmed(assignment, staged_path, present_labels, labels_to_confirm, comment)
+            return self._finish_confirmed(assignment, staged_path, present_labels, labels_to_confirm, comment, user)
         finally:
             staged_path.unlink(missing_ok=True)
 
-    def _finish_rejected(self, assignment: Assignment, comment: str | None) -> "SubmissionOutcome":
+    def _finish_rejected(self, assignment: Assignment, comment: str | None, user: User) -> "SubmissionOutcome":
         with self._lock:
             assignment.state = "rejected"
             assignment.quality_check_confirmed = False
@@ -819,12 +933,14 @@ class QCStore:
                 "quality_check_confirmed": False,
                 "segmentation_written": False,
                 "updated_labels": {},
+                "data_access": user.data_access,
                 "comment": comment,
             },
             dataset_id=assignment.dataset_id,
             summary=(
                 f"Subject {assignment.subject_key} submitted by '{assignment.user}' with "
                 f"quality_check_confirmed=False; dataset left unchanged."
+                + _seen(user)
                 + (f" Comment: {comment}" if comment else "")
             ),
         )
@@ -839,20 +955,24 @@ class QCStore:
     def _finish_confirmed(
         self,
         assignment: Assignment,
-        staged_path: Path,
+        staged_path: Path | None,
         present_labels: dict[str, int],
         labels_to_confirm: list[str],
         comment: str | None,
+        user: User,
     ) -> "SubmissionOutcome":
+        """Record a confirmation; ``staged_path`` None confirms the stored segmentation as it is."""
         dataset_id, subject_id = assignment.dataset_id, assignment.subject_id
         target_path = self.segmentation_path(dataset_id, subject_id)
+        written = staged_path is not None
 
         with self._lock:
             previous = self.subject_info(dataset_id, subject_id).segmentation or {}
-            backup_path = self._backup_segmentation(target_path) if target_path.exists() else None
-
-            target_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(staged_path), str(target_path))
+            backup_path = None
+            if written:
+                backup_path = self._backup_segmentation(target_path) if target_path.exists() else None
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(staged_path), str(target_path))
 
             # A label the reviewer deleted from a confirmed segmentation is no longer available.
             removed_labels = [
@@ -884,7 +1004,7 @@ class QCStore:
             assignment.confirmed_labels = labels_to_confirm
             assignment.removed_labels = removed_labels if self.config.mark_removed_labels_absent else []
             assignment.comment = comment
-            assignment.segmentation_written = True
+            assignment.segmentation_written = written
             assignment.backup_path = str(backup_path) if backup_path else None
             self._save_assignments()
 
@@ -901,20 +1021,28 @@ class QCStore:
                 "subject_id": subject_id,
                 "subject_key": assignment.subject_key,
                 "quality_check_confirmed": True,
-                "segmentation_written": True,
+                "segmentation_written": written,
+                "use_stored_segmentation": not written,
                 "segmentation_path": str(target_path),
                 "backup_path": assignment.backup_path,
                 "labels_in_segmentation": sorted(present_labels),
                 "updated_labels": updated_labels,
                 "removed_labels": assignment.removed_labels,
+                "data_access": user.data_access,
                 "comment": comment,
             },
             dataset_id=dataset_id,
             summary=(
                 f"Subject {assignment.subject_key} confirmed by '{assignment.user}': "
                 f"{len(labels_to_confirm)} label(s) set to {STATUS_REVIEWED} (reviewed) "
-                f"({', '.join(labels_to_confirm)}); segmentation written to '{target_path}'."
+                f"({', '.join(labels_to_confirm)}); "
+                + (
+                    f"segmentation written to '{target_path}'."
+                    if written
+                    else f"the stored segmentation '{target_path}' was confirmed as it is."
+                )
                 + (f" Removed: {', '.join(assignment.removed_labels)}." if assignment.removed_labels else "")
+                + _seen(user)
                 + (f" Comment: {comment}" if comment else "")
             ),
         )
@@ -993,13 +1121,48 @@ class SubmissionOutcome:
 
 
 # --------------------------------------------------------------------- helpers
+def _check_data_access(data_access: str) -> None:
+    if data_access not in DATA_ACCESS_DESCRIPTIONS:
+        raise QCError(
+            f"Unknown data access '{data_access}'. Choose one of: {', '.join(DATA_ACCESS_DESCRIPTIONS)}."
+        )
+
+
+def _seen(user: User) -> str:
+    """Audit note on what a verdict was based on, when that was less than the whole subject."""
+    if user.data_access == DEFAULT_DATA_ACCESS:
+        return ""
+    return f" The reviewer is sent {DATA_ACCESS_DESCRIPTIONS[user.data_access]}."
+
+
 def _atomic_write_json(path: Path, payload) -> None:
     """Write JSON through a temporary file so a crash cannot truncate the original."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=4)
-    os.replace(tmp_path, path)
+    _replace(tmp_path, path)
+
+
+#: Pauses, in seconds, between attempts at a replace that is refused.
+_REPLACE_RETRY_DELAYS = (0.05, 0.1, 0.2, 0.4, 0.8)
+
+
+def _replace(source: Path, target: Path) -> None:
+    """``os.replace``, tried again for a moment when it is refused.
+
+    On Windows a file that another process has open at that instant cannot be replaced -- a
+    virus scanner or indexer looking at a file just written, or another client on an SMB
+    share -- and the refusal clears within milliseconds. Failing at once would lose a
+    reviewer's submission for nothing.
+    """
+    for delay in _REPLACE_RETRY_DELAYS:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    os.replace(source, target)
 
 
 def _read_json(path: Path):
