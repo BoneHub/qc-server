@@ -282,8 +282,8 @@ users. Comments appear here too.
 ### Policy
 
 The server's settings. Change them and press **Save policy**. They take effect at once, and the
-dataset is re-scanned. See [Settings](#settings) for what each one does. Settings that
-`.env` or `docker-compose.yml` set come back at the next restart.
+dataset is re-scanned. See [Settings](#settings) for what each one does. A setting filled in
+in `.env` comes back at the next restart.
 
 ## Everyday tasks
 
@@ -311,9 +311,9 @@ invite link.
 **Remove someone.** **Disable** blocks them for now. **Delete** removes them, and their open
 subjects go back to the queue.
 
-**Review subjects that were reviewed before.** Set `BONEHUB_QC_ELIGIBLE_LABEL_VALUES=1,2` in
-`.env` and restart. Subjects with labels of status `2` then enter the queue as well. Subjects
-this server has already approved are not handed out again.
+**Review subjects that were reviewed before.** Set **Eligible label statuses** to `1,2` under
+**Policy**. Subjects with labels of status `2` then enter the queue as well. Subjects this
+server has already approved are not handed out again.
 
 **Have editors segment subjects that have no segmentation.** Turn on **Queue subjects without
 segmentation**. These subjects go to editors only. An editor who is sent the image only can
@@ -330,17 +330,16 @@ You can change a setting in two places:
 
 - **The Policy section of the admin panel.** The change applies at once and is saved in the
   server's `config.json`.
-- **`.env`**, as `BONEHUB_QC_<NAME>`. A value set there **wins over the panel at every start**.
+- **`.env`**, as `BONEHUB_QC_<NAME>`. A value filled in there **wins over the panel at every
+  start**, so a change you make in the panel is undone by the next restart or update. Leave a
+  setting blank in `.env` to manage it from the panel. `.env.example` leaves every setting
+  blank.
 
-> **Three settings are always set by `docker-compose.yml`**, even when `.env` leaves them
-> blank: *Eligible label statuses* (`1`), *Lease TTL* (`86400`) and *Max subjects per user and
-> role* (`1`). A change you make to these in the panel lasts only until the next restart or
-> update. Change them in `.env` instead.
-
-`docker-compose.yml` passes only some variables to the server: the three above, plus
-`BONEHUB_QC_ALLOWED_DATASET_IDS`, `BONEHUB_QC_EDITS_NEED_REVIEW` and the keys. To set any other
-setting from `.env`, also add it to the `environment:` block of `docker-compose.yml`, the same
-way as the others.
+`docker-compose.yml` passes only some variables to the server:
+`BONEHUB_QC_ELIGIBLE_LABEL_VALUES`, `BONEHUB_QC_LEASE_TTL_SECONDS`,
+`BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER`, `BONEHUB_QC_EDITS_NEED_REVIEW`,
+`BONEHUB_QC_ALLOWED_DATASET_IDS` and the keys. To set any other setting from `.env`, also add
+it to the `environment:` block of `docker-compose.yml`, the same way as the others.
 
 ### All settings
 
@@ -636,8 +635,8 @@ review.**
 - The labels had never been reviewed. They always need a reviewer.
 
 **A setting I changed in the panel came back after a restart.**
-`.env` or `docker-compose.yml` sets it. See
-[Where settings come from](#where-settings-come-from).
+`.env` sets it. Blank it there to manage it from the panel, then run `docker compose up -d`.
+See [Where settings come from](#where-settings-come-from).
 
 **A subject has no buttons, only "with *name*".**
 Someone is working on it. Wait, or press **Release** under **Assignments**.
