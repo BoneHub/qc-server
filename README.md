@@ -60,7 +60,7 @@ The server runs in Docker; there is no other supported way to run it.
 ```bash
 git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
 cd bonehub_dataset_quality_check_server
-cp .env.example .env                          # then set the share and its credentials
+cp .env.example .env                          # then say where the dataset is
 docker compose up -d --build
 docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
 ```
@@ -69,32 +69,42 @@ Open `http://<host>:8000/admin` and log in with that key. Reviewers use
 `http://<host>:8000/review`; editors connect the 3D Slicer extension to
 `http://<host>:8000`.
 
-The dataset is mounted over SMB, configured by four values in `.env`:
+The dataset is on a disk of the Docker host or on an SMB share. Say which in `.env`: fill
+in one of the two and leave the other blank.
 
-| Variable | Example |
-| --- | --- |
-| `BONEHUB_DATASET_SHARE` | `//192.168.0.10/Data/BoneHub/BoneHub_Dataset` |
-| `BONEHUB_SMB_USERNAME` | `alice` |
-| `BONEHUB_SMB_PASSWORD` | the share password |
-| `BONEHUB_SMB_OPTIONS` | `domain=AD,vers=3.0` |
+| Dataset on | Variable | Example |
+| --- | --- | --- |
+| a disk of the Docker host | `BONEHUB_DATASET_PATH` | `C:/data/BoneHub_Dataset` |
+| an SMB share | `BONEHUB_DATASET_SHARE` | `//192.168.0.10/Data/BoneHub/BoneHub_Dataset` |
+| | `BONEHUB_SMB_USERNAME` | `alice` |
+| | `BONEHUB_SMB_PASSWORD` | the share password |
+| | `BONEHUB_SMB_OPTIONS` | `domain=AD,vers=3.0` |
 
-Give `BONEHUB_DATASET_SHARE` as a UNC path, **not** as a Windows drive letter. Docker
-Desktop cannot bind-mount a mapped network drive: handed `Z:/BoneHub/BoneHub_Dataset` it
+A local folder is bind-mounted; the share is mounted by Docker itself. If both are filled
+in, the local folder is used. `docker compose` refuses to start when neither is, or when a
+share is given without its username and password.
+
+A mapped network drive is not a local folder. Give its share as a UNC path in
+`BONEHUB_DATASET_SHARE`, **not** as a drive letter in `BONEHUB_DATASET_PATH`: Docker
+Desktop cannot bind-mount a mapped network drive. Handed `Z:/BoneHub/BoneHub_Dataset` it
 creates an empty folder and mounts that instead, so the server starts normally against an
 empty dataset and reports `0 of 0 subjects`. `net use` prints the UNC path behind each
-mapped drive. A password containing a comma cannot be used (the comma ends the mount
+mapped drive. A share password containing a comma cannot be used (the comma ends the mount
 option), and a literal `$` must be written `$$`.
 
 The share is mounted through a named volume whose options are fixed when it is first
-created, so after changing any of the four values recreate it:
+created, so after changing the share or any SMB value recreate it:
 
 ```bash
 docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
 ```
 
 That volume holds no data of its own — only the mount to the share — so nothing is lost.
-For a dataset on a local disk, [`docker-compose.yml`](docker-compose.yml) ends with the
-bind-mount alternative.
+
+The server keeps its state in the dataset folder (see
+[Where the server keeps things](#where-the-server-keeps-things)). To move a dataset from a
+share to a local disk or back, copy its `.bonehub_qc` folder along, or the server finds no
+state there and starts on an empty one.
 
 To update the server, pull and rebuild; the server keeps its admin key and users:
 
@@ -528,7 +538,7 @@ To run one module or one test, replace the last command, for example with
 | `test_client.py` | `client.py` against a real uvicorn server on a real socket, in both roles |
 | `test_cli.py` | `bonehub-qc-server` commands |
 | `test_concurrency.py` | Several users hitting the server at once, and other users answered while one submission is checked or an approval is written |
-| `test_deployment.py` | Start-up from environment variables only, the credentials volume, and the shipped docker files |
+| `test_deployment.py` | Start-up from environment variables only, the credentials volume, the shipped docker files, and — where the docker CLI is at hand — what Compose makes of a local dataset folder or a share |
 
 `tests/support.py` holds the dataset builder, the base test case, and one-line steps of the
 workflow (`review`, `edit`).

@@ -1,15 +1,17 @@
-# Run the quality-check server against a BoneHub dataset folder on an SMB share.
+# Run the quality-check server against a BoneHub dataset folder, on a disk of this computer
+# or on an SMB share.
 #
-#   1. copy .env.example to .env and fill in the share and your credentials
+#   1. copy .env.example to .env and say where the dataset is: BONEHUB_DATASET_PATH for a
+#      folder on this computer, or BONEHUB_DATASET_SHARE and its credentials for a share
 #   2. docker compose up -d --build
 #   3. docker compose logs | grep -A2 "admin key"   # a new server prints its admin key once
 #   4. open http://localhost:8000/admin
 #
-# The dataset is mounted through a CIFS volume rather than a bind mount because Docker
-# Desktop cannot bind-mount a Windows mapped network drive: given "Z:/..." it silently
-# creates an empty folder instead, and the server then starts against an empty dataset.
-# Mounting the UNC path here keeps Docker out of the drive-letter business entirely.
-# For a dataset on a local disk, see the bind-mount block at the bottom of this file.
+# A local folder is bind-mounted. A share is mounted through a CIFS volume rather than a
+# bind mount because Docker Desktop cannot bind-mount a Windows mapped network drive: given
+# "Z:/..." it silently creates an empty folder instead, and the server then starts against
+# an empty dataset. Mounting the UNC path keeps Docker out of the drive-letter business
+# entirely.
 
 services:
   bonehub-qc-server:
@@ -19,15 +21,18 @@ services:
     ports:
       - "${BONEHUB_QC_PORT:-8000}:8000"
     volumes:
+      # The dataset: the folder in BONEHUB_DATASET_PATH when that is filled in, the share of
+      # the bonehub-dataset volume below when it is blank. (Compose bind-mounts a path and
+      # mounts a bare name as a volume.)
       # Mounted read-write: the server keeps its non-secret state -- the verdicts and the
       # corrected segmentations waiting for approval among it -- in .bonehub_qc/<server id>/,
       # and writes what the administrator approves into the segmentations, Subject_info
       # files and quality-check logs of the dataset.
-      - "bonehub-dataset:/data"
+      - "${BONEHUB_DATASET_PATH:-bonehub-dataset}:/data"
       # The server's credentials -- its id, private key, admin key and user accounts --
-      # stay here, on the Docker host, never on the share. This volume IS the server:
+      # stay here, on the Docker host, never with the dataset. This volume IS the server:
       # removing it (docker compose down -v) creates a new server on the next start, with a
-      # new admin key, no users, and a new state folder on the share.
+      # new admin key, no users, and a new state folder in the dataset.
       - "bonehub-qc-credentials:/var/lib/bonehub-qc"
     environment:
       BONEHUB_QC_DATASET_ROOT: /data
@@ -48,11 +53,17 @@ services:
     restart: unless-stopped
 
 volumes:
-  # A named volume, so the CIFS options below are applied by Docker's own mount rather
-  # than by Windows. uid/gid 0 match the container, which runs as root.
+  # The SMB share. Used only when BONEHUB_DATASET_PATH is blank; Compose leaves the volume
+  # out otherwise. A named volume, so the CIFS options below are applied by Docker's own
+  # mount rather than by Windows. uid/gid 0 match the container, which runs as root.
+  #
+  # The substitutions check .env before anything starts: with neither BONEHUB_DATASET_PATH
+  # nor BONEHUB_DATASET_SHARE filled in, the device stops Compose with a message (with a
+  # path, the device takes it, but the volume is not used then), and a share is refused
+  # without its username and password.
   #
   # IMPORTANT: the options are baked in when the volume is first created. After changing
-  # anything here or in the SMB variables in .env, recreate it:
+  # the share or the SMB variables in .env, recreate it:
   #     docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
   # Nothing is lost -- the volume holds no data of its own, only the mount to the share.
   bonehub-dataset:
@@ -60,21 +71,11 @@ volumes:
     driver: local
     driver_opts:
       type: cifs
-      device: "${BONEHUB_DATASET_SHARE:?set BONEHUB_DATASET_SHARE in .env, e.g. //server/share/BoneHub_Dataset}"
-      o: "username=${BONEHUB_SMB_USERNAME:?set BONEHUB_SMB_USERNAME in .env},password=${BONEHUB_SMB_PASSWORD:?set BONEHUB_SMB_PASSWORD in .env},uid=0,gid=0,file_mode=0664,dir_mode=0775,${BONEHUB_SMB_OPTIONS:-vers=3.0}"
+      device: "${BONEHUB_DATASET_SHARE:-${BONEHUB_DATASET_PATH:?set BONEHUB_DATASET_PATH (a folder on this computer) or BONEHUB_DATASET_SHARE (an SMB share) in .env}}"
+      o: "username=${BONEHUB_DATASET_SHARE:+${BONEHUB_SMB_USERNAME:?set BONEHUB_SMB_USERNAME in .env}},password=${BONEHUB_DATASET_SHARE:+${BONEHUB_SMB_PASSWORD:?set BONEHUB_SMB_PASSWORD in .env}},uid=0,gid=0,file_mode=0664,dir_mode=0775,${BONEHUB_SMB_OPTIONS:-vers=3.0}"
 
   # A plain local volume on the Docker host. Unlike the dataset volume above, it holds data:
   # the server's credentials. Keep it as long as the server should keep its admin key and
   # users.
   bonehub-qc-credentials:
     name: bonehub_qc_credentials
-
-# Dataset on a local disk instead of a share? Replace the bonehub-dataset volume above with
-# nothing, keep bonehub-qc-credentials, and mount the dataset with a plain bind mount:
-#
-#   volumes:
-#     - "${BONEHUB_DATASET_ROOT:?set BONEHUB_DATASET_ROOT in .env}:/data"
-#     - "bonehub-qc-credentials:/var/lib/bonehub-qc"
-#
-# This works only for a real local path (C:/data/BoneHub_Dataset), never for a mapped
-# network drive letter.

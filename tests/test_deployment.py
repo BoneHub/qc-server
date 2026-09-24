@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import os
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -187,6 +191,82 @@ class DeploymentFileTests(unittest.TestCase):
     def test_the_state_folder_is_not_committed(self):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
         self.assertIn(".env", gitignore, "the filled-in .env holds a share password")
+
+    def test_the_env_example_offers_a_local_folder_and_a_share_blank(self):
+        """A share filled in by the example would demand SMB credentials for a local folder too."""
+        env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+        for name in ("BONEHUB_DATASET_PATH", "BONEHUB_DATASET_SHARE", "BONEHUB_SMB_USERNAME", "BONEHUB_SMB_PASSWORD"):
+            self.assertRegex(env_example, rf"(?m)^{name}=$", f".env.example should offer {name}, blank")
+
+
+class ComposeDatasetLocationTests(unittest.TestCase):
+    """What ``docker compose`` makes of docker-compose.yml for each way .env gives the dataset.
+
+    ``docker compose config`` only reads the files, so it needs the docker CLI but no running
+    daemon. Skipped where there is none, as inside the server's own image.
+    """
+
+    SHARE = "//192.168.0.10/Data/BoneHub/BoneHub_Dataset"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.docker = shutil.which("docker")
+        if not cls.docker or subprocess.run([cls.docker, "compose", "version"], capture_output=True).returncode:
+            raise unittest.SkipTest("needs the docker CLI with Compose")
+
+    def compose_config(self, **values: str) -> subprocess.CompletedProcess:
+        """``docker compose config`` with .env.example, ``values`` filled in, as the .env."""
+        text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+        for name, value in values.items():
+            text, count = re.subn(rf"(?m)^{name}=.*$", lambda _: f"{name}={value}", text)
+            self.assertEqual(count, 1, f".env.example has no {name}= line")
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        env_file = tmp / ".env"
+        env_file.write_text(text, encoding="utf-8")
+        # The env file alone speaks: none of this shell's own BONEHUB_* or COMPOSE_* variables.
+        environment = {k: v for k, v in os.environ.items() if not k.upper().startswith(("BONEHUB_", "COMPOSE_"))}
+        command = [self.docker, "compose", "--project-directory", str(PROJECT_ROOT), "--env-file", str(env_file)]
+        return subprocess.run(
+            [*command, "config", "--format", "json"], capture_output=True, text=True, env=environment, timeout=120
+        )
+
+    def project(self, **values: str) -> dict:
+        result = self.compose_config(**values)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def dataset_mount(self, project: dict) -> dict:
+        return next(m for m in project["services"]["bonehub-qc-server"]["volumes"] if m["target"] == "/data")
+
+    def test_a_local_folder_is_bind_mounted(self):
+        folder = str(Path(tempfile.gettempdir()) / "BoneHub_Dataset")
+        project = self.project(BONEHUB_DATASET_PATH=folder)
+        mount = self.dataset_mount(project)
+        self.assertEqual(mount["type"], "bind")
+        self.assertEqual(Path(mount["source"]), Path(folder))
+        self.assertNotIn("bonehub-dataset", project["volumes"], "no share volume is made for a local folder")
+
+    def test_a_share_is_mounted_over_cifs(self):
+        project = self.project(BONEHUB_DATASET_SHARE=self.SHARE, BONEHUB_SMB_USERNAME="alice", BONEHUB_SMB_PASSWORD="secret")
+        mount = self.dataset_mount(project)
+        self.assertEqual((mount["type"], mount["source"]), ("volume", "bonehub-dataset"))
+        options = project["volumes"]["bonehub-dataset"]["driver_opts"]
+        self.assertEqual((options["type"], options["device"]), ("cifs", self.SHARE))
+        self.assertTrue(options["o"].startswith("username=alice,password=secret,"), options["o"])
+
+    def test_no_dataset_location_stops_compose(self):
+        result = self.compose_config()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("BONEHUB_DATASET_PATH", result.stderr)
+        self.assertIn("BONEHUB_DATASET_SHARE", result.stderr)
+
+    def test_a_share_without_its_credentials_stops_compose(self):
+        for given, missing in (("BONEHUB_SMB_PASSWORD", "BONEHUB_SMB_USERNAME"), ("BONEHUB_SMB_USERNAME", "BONEHUB_SMB_PASSWORD")):
+            with self.subTest(missing=missing):
+                result = self.compose_config(BONEHUB_DATASET_SHARE=self.SHARE, **{given: "x"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(missing, result.stderr)
 
 
 if __name__ == "__main__":
