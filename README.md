@@ -606,10 +606,25 @@ the dataset share.
 **Moving the dataset** from a share to a local disk, or back: copy its `.bonehub_qc` folder
 along. Otherwise the server finds no work in progress at the new location.
 
-**Several servers on one dataset.** Servers with different administrators can work on the same
-dataset, at the same time or one after the other. Each keeps its own folder. A server never
-hands out a subject that another server has out or in progress, because that subject's
-verdicts wait for the other administrator. `bonehub-qc-server sessions` lists the servers.
+**Several servers on one dataset** are for separate teams, each with its own administrator.
+They do not serve more users: reviewers spend minutes on each subject, so one server keeps up
+with a whole team, and what limits it is how fast the dataset share sends images, which a
+second server would share too. If downloads are slow, put the dataset on a local disk of the
+server's computer instead.
+
+Each server has its own admin key, users, settings and approval queue, and its own folder in
+`.bonehub_qc`. Servers can work on the dataset at the same time or one after the other. A
+server never hands out a subject that another server has out or in progress, because that
+subject's verdicts wait for the other administrator. `bonehub-qc-server sessions` lists the
+servers.
+
+**A second server needs its own credentials volume.** Two servers started from one volume are
+the same server running twice, and each overwrites the other's work -- for example a copy of
+the volume restored on another computer while the original still runs. A clone of this
+repository on another computer gets a volume of its own. For a second server on the same
+computer, copy the project folder under another name (Compose tells projects apart by their
+folder's name), then in the copy change `container_name` and the credentials volume's `name:`
+(`bonehub_qc_credentials`) in `docker-compose.yml`, and `BONEHUB_QC_PORT` in `.env`.
 
 ## Troubleshooting
 
