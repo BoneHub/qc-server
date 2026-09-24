@@ -12,28 +12,35 @@
 # "Z:/..." it silently creates an empty folder instead, and the server then starts against
 # an empty dataset. Mounting the UNC path keeps Docker out of the drive-letter business
 # entirely.
+#
+# Another server on this computer, on another dataset or on the same one, runs from a copy
+# of this folder whose .env gives it a COMPOSE_PROJECT_NAME and a port of its own.
+
+# The server's name on this computer. Compose names the container, the image and the volumes
+# after it -- the credentials volume of this one is bonehub_qc_credentials -- so nothing
+# below has a fixed name that a second server would share. COMPOSE_PROJECT_NAME in .env
+# replaces it.
+name: bonehub_qc
 
 services:
   bonehub-qc-server:
     build: .
-    image: bonehub-qc-server:latest
-    container_name: bonehub-qc-server
     ports:
       - "${BONEHUB_QC_PORT:-8000}:8000"
     volumes:
       # The dataset: the folder in BONEHUB_DATASET_PATH when that is filled in, the share of
-      # the bonehub-dataset volume below when it is blank. (Compose bind-mounts a path and
-      # mounts a bare name as a volume.)
+      # the dataset volume below when it is blank. (Compose bind-mounts a path and mounts a
+      # bare name as a volume.)
       # Mounted read-write: the server keeps its non-secret state -- the verdicts and the
       # corrected segmentations waiting for approval among it -- in .bonehub_qc/<server id>/,
       # and writes what the administrator approves into the segmentations, Subject_info
       # files and quality-check logs of the dataset.
-      - "${BONEHUB_DATASET_PATH:-bonehub-dataset}:/data"
+      - "${BONEHUB_DATASET_PATH:-dataset}:/data"
       # The server's credentials -- its id, private key, admin key and user accounts --
       # stay here, on the Docker host, never with the dataset. This volume IS the server:
       # removing it (docker compose down -v) creates a new server on the next start, with a
       # new admin key, no users, and a new state folder in the dataset.
-      - "bonehub-qc-credentials:/var/lib/bonehub-qc"
+      - "credentials:/var/lib/bonehub-qc"
     environment:
       BONEHUB_QC_DATASET_ROOT: /data
       BONEHUB_QC_CREDENTIALS_DIR: /var/lib/bonehub-qc
@@ -65,11 +72,11 @@ volumes:
   # without its username and password.
   #
   # IMPORTANT: the options are baked in when the volume is first created. After changing
-  # the share or the SMB variables in .env, recreate it:
-  #     docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
+  # the share or the SMB variables in .env, recreate it (<name>_dataset, after the server's
+  # name above):
+  #     docker compose down && docker volume rm bonehub_qc_dataset && docker compose up -d
   # Nothing is lost -- the volume holds no data of its own, only the mount to the share.
-  bonehub-dataset:
-    name: bonehub_dataset_qc_data
+  dataset:
     driver: local
     driver_opts:
       type: cifs
@@ -78,6 +85,5 @@ volumes:
 
   # A plain local volume on the Docker host. Unlike the dataset volume above, it holds data:
   # the server's credentials. Keep it as long as the server should keep its admin key and
-  # users.
-  bonehub-qc-credentials:
-    name: bonehub_qc_credentials
+  # users. Named <name>_credentials, after the server's name above.
+  credentials:

@@ -175,7 +175,7 @@ class DeploymentFileTests(unittest.TestCase):
         """Without it, recreating the container would silently make a new server."""
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn('"bonehub-qc-credentials:/var/lib/bonehub-qc"', compose)
+        self.assertIn('"credentials:/var/lib/bonehub-qc"', compose)
         self.assertIn("BONEHUB_QC_CREDENTIALS_DIR: /var/lib/bonehub-qc", compose)
         self.assertIn("BONEHUB_QC_CREDENTIALS_DIR=/var/lib/bonehub-qc", dockerfile)
 
@@ -239,21 +239,42 @@ class ComposeDatasetLocationTests(unittest.TestCase):
     def dataset_mount(self, project: dict) -> dict:
         return next(m for m in project["services"]["bonehub-qc-server"]["volumes"] if m["target"] == "/data")
 
+    FOLDER = str(Path(tempfile.gettempdir()) / "BoneHub_Dataset")
+
     def test_a_local_folder_is_bind_mounted(self):
-        folder = str(Path(tempfile.gettempdir()) / "BoneHub_Dataset")
-        project = self.project(BONEHUB_DATASET_PATH=folder)
+        project = self.project(BONEHUB_DATASET_PATH=self.FOLDER)
         mount = self.dataset_mount(project)
         self.assertEqual(mount["type"], "bind")
-        self.assertEqual(Path(mount["source"]), Path(folder))
-        self.assertNotIn("bonehub-dataset", project["volumes"], "no share volume is made for a local folder")
+        self.assertEqual(Path(mount["source"]), Path(self.FOLDER))
+        self.assertNotIn("dataset", project["volumes"], "no share volume is made for a local folder")
 
     def test_a_share_is_mounted_over_cifs(self):
         project = self.project(BONEHUB_DATASET_SHARE=self.SHARE, BONEHUB_SMB_USERNAME="alice", BONEHUB_SMB_PASSWORD="secret")
         mount = self.dataset_mount(project)
-        self.assertEqual((mount["type"], mount["source"]), ("volume", "bonehub-dataset"))
-        options = project["volumes"]["bonehub-dataset"]["driver_opts"]
+        self.assertEqual((mount["type"], mount["source"]), ("volume", "dataset"))
+        options = project["volumes"]["dataset"]["driver_opts"]
         self.assertEqual((options["type"], options["device"]), ("cifs", self.SHARE))
         self.assertTrue(options["o"].startswith("username=alice,password=secret,"), options["o"])
+
+    def test_a_server_without_a_name_is_bonehub_qc(self):
+        project = self.project(BONEHUB_DATASET_PATH=self.FOLDER)
+        self.assertEqual(project["name"], "bonehub_qc")
+        self.assertEqual(project["volumes"]["credentials"]["name"], "bonehub_qc_credentials")
+
+    def test_a_second_server_on_this_computer_shares_nothing_with_the_first(self):
+        """Sharing the credentials volume would make it the first server running twice."""
+        project = self.project(
+            COMPOSE_PROJECT_NAME="bonehub_qc_2",
+            BONEHUB_DATASET_SHARE=self.SHARE,
+            BONEHUB_SMB_USERNAME="alice",
+            BONEHUB_SMB_PASSWORD="secret",
+        )
+        self.assertEqual(project["name"], "bonehub_qc_2")
+        names = {key: volume["name"] for key, volume in project["volumes"].items()}
+        self.assertEqual(names, {"credentials": "bonehub_qc_2_credentials", "dataset": "bonehub_qc_2_dataset"})
+        service = project["services"]["bonehub-qc-server"]
+        self.assertNotIn("container_name", service, "a fixed container name would collide")
+        self.assertNotIn("image", service, "a shared image would give one server the other's update")
 
     def test_no_dataset_location_stops_compose(self):
         result = self.compose_config()

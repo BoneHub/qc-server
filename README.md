@@ -124,10 +124,12 @@ In `.env`, fill in **one** of the two options and leave the other blank:
   server starts with `0 of 0 subjects`.
 - A share password cannot contain a comma. Write a `$` in it as `$$`.
 - **After changing the share or any `BONEHUB_SMB_…` value**, recreate the share's volume.
-  This loses nothing, because the volume only holds the connection to the share:
+  This loses nothing, because the volume only holds the connection to the share. For a
+  server with a [name of its own](#another-server-on-this-computer), write that name instead
+  of `bonehub_qc`:
 
   ```bash
-  docker compose down && docker volume rm bonehub_dataset_qc_data && docker compose up -d
+  docker compose down && docker volume rm bonehub_qc_dataset && docker compose up -d
   ```
 
 ### Update the server
@@ -548,6 +550,26 @@ Run these on the computer where the server runs, in the project folder:
 > server, with a new admin key, no users, and an empty queue. See
 > [Where the server keeps things](#where-the-server-keeps-things).
 
+### Another server on this computer
+
+One computer can run several servers, each on a dataset of its own or on the same one. Each
+runs from its own copy of this project folder, whose `.env` sets:
+
+| Variable | Value |
+| --- | --- |
+| `COMPOSE_PROJECT_NAME` | a name of its own, e.g. `bonehub_qc_2`. Blank is `bonehub_qc` |
+| `BONEHUB_QC_PORT` | a free port, e.g. `8001` |
+| `BONEHUB_DATASET_PATH` or `BONEHUB_DATASET_SHARE` | its dataset, as [for the first server](#tell-the-server-where-the-dataset-is) |
+
+Docker names the server's container and volumes after its name, so its credentials go into
+`bonehub_qc_2_credentials`. Run every `docker compose` command, updates included, in the
+server's own folder.
+
+- **A copy left at the same name takes over the first server:** `docker compose up -d` in it
+  replaces the first server's container with its own settings.
+- **Renaming a server that has already run starts a new server**, with a new admin key and no
+  users. The old name's credentials volume still holds the old server.
+
 ### Logs and audit trail
 
 | Where | What |
@@ -573,9 +595,10 @@ Run these on the computer where the server runs, in the project folder:
 
 The server keeps its data in two places.
 
-**Credentials, on the Docker host**, in the `bonehub_qc_credentials` Docker volume: the
-server's id, its private key, the admin key, and the user accounts. They are never written to
-the dataset share.
+**Credentials, on the Docker host**, in the `bonehub_qc_credentials` Docker volume
+(`<name>_credentials` for [another server on this computer](#another-server-on-this-computer)):
+the server's id, its private key, the admin key, and the user accounts. They are never written
+to the dataset share.
 
 **Everything else, in the dataset folder**, in a folder of the server's own:
 
@@ -621,10 +644,9 @@ servers.
 **A second server needs its own credentials volume.** Two servers started from one volume are
 the same server running twice, and each overwrites the other's work -- for example a copy of
 the volume restored on another computer while the original still runs. A clone of this
-repository on another computer gets a volume of its own. For a second server on the same
-computer, copy the project folder under another name (Compose tells projects apart by their
-folder's name), then in the copy change `container_name` and the credentials volume's `name:`
-(`bonehub_qc_credentials`) in `docker-compose.yml`, and `BONEHUB_QC_PORT` in `.env`.
+repository on another computer gets a volume of its own. On the same computer, give the
+second server a name of its own: see
+[Another server on this computer](#another-server-on-this-computer).
 
 ## Troubleshooting
 
