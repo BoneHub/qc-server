@@ -419,7 +419,7 @@ To run one module or one test, replace the last command, for example with
 | `test_admin.py` | The admin panel endpoints behind the admin key |
 | `test_client.py` | `client.py` against a real uvicorn server on a real socket |
 | `test_cli.py` | `bonehub-qc-server` commands |
-| `test_concurrency.py` | Several users hitting the server at once |
+| `test_concurrency.py` | Several users hitting the server at once, and other users answered while one submission is checked and written |
 | `test_deployment.py` | Start-up from environment variables only, the credentials volume, and the shipped docker files |
 
 `tests/support.py` holds the dataset builder and the base test case.

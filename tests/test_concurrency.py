@@ -1,7 +1,8 @@
 """Several clients hitting the server at the same time.
 
-The reviewers are people in 3D Slicer, so the load is tiny, but two of them pressing
-"next subject" at the same moment must still never be handed the same subject.
+The users are people, so the load is tiny, but two of them pressing "next subject" at the
+same moment must still never be handed the same subject, and one user's submission, which
+takes seconds for a real scan, must not hold up anybody else.
 """
 
 from __future__ import annotations
@@ -10,9 +11,11 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
+from bonehub_quality_check_server.client import BoneHubQCClient
 from bonehub_quality_check_server.store import QCError
 
 from tests.support import QCTestCase
+from tests.test_client import LiveServerTestCase
 
 
 class ConcurrentHandoutTests(QCTestCase):
@@ -113,6 +116,70 @@ class ConcurrentHandoutTests(QCTestCase):
         entries = store.audit.read_recent(limit=100, kind="submission")
         self.assertEqual(len(entries), 8)
         self.assertEqual(len({e["subject_key"] for e in entries}), 8)
+
+
+class BusyServerTests(LiveServerTestCase):
+    """Everyone else is answered while the server works on one user's submission.
+
+    Checking and writing the segmentation of a real scan takes seconds. When the submission
+    held up the other requests, the whole server seemed to freeze for everyone until it was done.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        # A short timeout, so that a request stuck behind the submission fails the test quickly.
+        self.bob = BoneHubQCClient(self.base_url, self.bob_key, timeout=5)
+
+    def hold(self, name: str) -> tuple[threading.Event, threading.Event]:
+        """Make a call to the store's method ``name`` wait until ``release`` is set.
+
+        Returns ``(entered, release)``; ``entered`` is set once a call is waiting.
+        """
+        entered, release = threading.Event(), threading.Event()
+        original = getattr(self.store, name)
+
+        def held(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=30)
+            return original(*args, **kwargs)
+
+        setattr(self.store, name, held)
+        return entered, release
+
+    def submit_in_background(self, pool: ThreadPoolExecutor):
+        """Alice leases a subject and confirms it with an upload, on another thread."""
+        handout = self.client.next_subject()
+        return pool.submit(
+            self.client.submit,
+            handout["assignment_id"],
+            quality_check_confirmed=True,
+            segmentation_path=self.upload_file(["FEMUR_LEFT", "FEMUR_RIGHT"]),
+        )
+
+    def test_others_are_answered_while_a_segmentation_is_checked(self):
+        entered, release = self.hold("inspect_segmentation")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            submission = self.submit_in_background(pool)
+            try:
+                self.assertTrue(entered.wait(timeout=10), "the submission never reached its check")
+                self.assertEqual(self.bob.ping()["user"], "bob")
+                handout = self.bob.next_subject()
+                self.bob.download_image(handout["assignment_id"], self.tmp_path / "bob" / "image.nii.gz")
+            finally:
+                release.set()
+            self.assertTrue(submission.result(timeout=30)["quality_check_confirmed"])
+
+    def test_a_ping_is_answered_while_a_confirmation_writes_the_dataset(self):
+        """Subject_info is rewritten under the store lock, which checking a key does not take."""
+        entered, release = self.hold("_mutate_subject_info")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            submission = self.submit_in_background(pool)
+            try:
+                self.assertTrue(entered.wait(timeout=10), "the submission never reached the dataset")
+                self.assertEqual(self.bob.ping()["user"], "bob")
+            finally:
+                release.set()
+            self.assertTrue(submission.result(timeout=30)["quality_check_confirmed"])
 
 
 if __name__ == "__main__":

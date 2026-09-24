@@ -28,8 +28,10 @@ review the same subject at the same time.
 Only datasets written under this server's ``bonehub_data_schema`` version are served: in
 another version the label values, label statuses and segmentation format may differ.
 
-A single re-entrant lock serialises state and dataset writes. The work is human-paced,
-so the simplicity is worth more than the concurrency; run the server with one worker.
+A re-entrant lock serialises state and dataset writes. The work is human-paced, so the
+simplicity is worth more than the concurrency; run the server with one worker. User
+accounts have a lock of their own, taken inside the first when both are needed, so that
+checking a key -- which every request does -- never waits for a write to the share.
 """
 
 from __future__ import annotations
@@ -173,6 +175,7 @@ class QCStore:
         self.admin_key, self.admin_key_generated = auth.load_or_create_admin_key(self.credentials_dir)
 
         self._lock = threading.RLock()
+        self._users_lock = threading.RLock()
 
         self._users: dict[str, User] = self._load_users()
         self._users_stamp = self._users_file_stamp()
@@ -381,7 +384,7 @@ class QCStore:
         return stat.st_mtime_ns, stat.st_size
 
     def _refresh_users(self) -> None:
-        """Pick up user accounts another process changed. Caller holds the lock.
+        """Pick up user accounts another process changed. Caller holds the users lock.
 
         The CLI runs inside the container next to the live server (``docker compose exec``),
         so an account it adds must reach the server, and must not be lost on its next save.
@@ -396,7 +399,7 @@ class QCStore:
         self._users_stamp = self._users_file_stamp()
 
     def list_users(self) -> list[dict]:
-        with self._lock:
+        with self._users_lock:
             self._refresh_users()
             users = [user.public_dict() for user in self._users.values()]
         counts = self._assignment_counts_per_user()
@@ -422,7 +425,7 @@ class QCStore:
             raise QCError("A user name is required.")
         _check_data_access(data_access)
         roles = _check_roles(roles)
-        with self._lock:
+        with self._users_lock:
             self._refresh_users()
             if name in self._users:
                 raise QCError(f"User '{name}' already exists.", status_code=409)
@@ -449,7 +452,7 @@ class QCStore:
 
     def rotate_user_key(self, name: str) -> str:
         """Issue a new API key for a user and invalidate the old one."""
-        with self._lock:
+        with self._users_lock:
             user = self._require_user(name)
             api_key = auth.generate_api_key()
             user.key_prefix = auth.key_prefix(api_key)
@@ -459,7 +462,7 @@ class QCStore:
         return api_key
 
     def set_user_active(self, name: str, active: bool) -> User:
-        with self._lock:
+        with self._users_lock:
             user = self._require_user(name)
             user.active = active
             self._save_users()
@@ -489,7 +492,7 @@ class QCStore:
             _check_data_access(data_access)
         if roles is not None:
             roles = _check_roles(roles)
-        with self._lock:
+        with self._users_lock:
             user = self._require_user(name)
             if allowed_dataset_ids is not UNSET:
                 user.allowed_dataset_ids = allowed_dataset_ids
@@ -509,7 +512,7 @@ class QCStore:
 
     def delete_user(self, name: str) -> None:
         """Remove a user and release whatever they were still holding."""
-        with self._lock:
+        with self._lock, self._users_lock:
             self._require_user(name)
             del self._users[name]
             self._save_users()
@@ -523,7 +526,7 @@ class QCStore:
         if not api_key:
             raise QCError("Missing API key. Send it in the 'X-API-Key' header.", status_code=401)
         candidate = auth.hash_api_key(api_key, self.private_key)
-        with self._lock:
+        with self._users_lock:
             self._refresh_users()
             for user in self._users.values():
                 if auth.keys_match(candidate, user.key_hash):
@@ -543,7 +546,7 @@ class QCStore:
         )
 
     def _require_user(self, name: str) -> User:
-        """Caller holds the lock."""
+        """Caller holds the users lock."""
         self._refresh_users()
         user = self._users.get(name)
         if user is None:
@@ -623,6 +626,9 @@ class QCStore:
         segmentation a subject has, so a subject without one is left to the editors.
         """
         self._ensure_fresh_index()
+        # Read from the share before the lock is taken: the other servers' leases are another
+        # process's state, which no lock here holds still anyway.
+        leased_elsewhere = self._leased_by_other_sessions()
         with self._lock:
             self._expire_stale_assignments()
 
@@ -642,45 +648,51 @@ class QCStore:
             ]
             if self.config.assignment_strategy == "random":
                 random.shuffle(candidates)
-            leased_elsewhere = self._leased_by_other_sessions()
 
-            for ref in candidates:
-                if ref.subject_key in leased_elsewhere or not self._subject_is_available(ref.subject_key, user):
-                    continue
-                now = datetime.now(timezone.utc)
-                assignment = Assignment(
-                    assignment_id=uuid.uuid4().hex,
-                    subject_key=ref.subject_key,
-                    dataset_id=ref.dataset_id,
-                    subject_id=ref.subject_id,
-                    user=user.name,
-                    state="assigned",
-                    assigned_at=_to_iso(now),
-                    expires_at=_to_iso(now + timedelta(seconds=self.config.lease_ttl_seconds)),
-                )
-                self._assignments[assignment.assignment_id] = assignment
-                self._save_assignments()
-                as_role = f" as {role}" if role else ""
-                self.audit.record(
-                    "assigned",
-                    {
-                        "assignment_id": assignment.assignment_id,
-                        "user": user.name,
-                        "role": role,
-                        "dataset_id": ref.dataset_id,
-                        "subject_id": ref.subject_id,
-                        "subject_key": ref.subject_key,
-                        "expires_at": assignment.expires_at,
-                    },
-                    dataset_id=ref.dataset_id,
-                    summary=(
-                        f"Assigned subject {ref.subject_key} to '{user.name}'{as_role} "
-                        f"(assignment {assignment.assignment_id})."
-                    ),
-                )
-                return assignment
+            ref = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.subject_key not in leased_elsewhere
+                    and self._subject_is_available(candidate.subject_key, user)
+                ),
+                None,
+            )
+            if ref is None:
+                raise QCError("No subject is available for quality check right now.", status_code=404)
+            now = datetime.now(timezone.utc)
+            assignment = Assignment(
+                assignment_id=uuid.uuid4().hex,
+                subject_key=ref.subject_key,
+                dataset_id=ref.dataset_id,
+                subject_id=ref.subject_id,
+                user=user.name,
+                state="assigned",
+                assigned_at=_to_iso(now),
+                expires_at=_to_iso(now + timedelta(seconds=self.config.lease_ttl_seconds)),
+            )
+            self._assignments[assignment.assignment_id] = assignment
+            self._save_assignments()
 
-        raise QCError("No subject is available for quality check right now.", status_code=404)
+        as_role = f" as {role}" if role else ""
+        self.audit.record(
+            "assigned",
+            {
+                "assignment_id": assignment.assignment_id,
+                "user": user.name,
+                "role": role,
+                "dataset_id": ref.dataset_id,
+                "subject_id": ref.subject_id,
+                "subject_key": ref.subject_key,
+                "expires_at": assignment.expires_at,
+            },
+            dataset_id=ref.dataset_id,
+            summary=(
+                f"Assigned subject {ref.subject_key} to '{user.name}'{as_role} "
+                f"(assignment {assignment.assignment_id})."
+            ),
+        )
+        return assignment
 
     def get_assignment(self, assignment_id: str, user: User | None = None) -> Assignment:
         with self._lock:

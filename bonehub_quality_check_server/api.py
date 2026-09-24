@@ -171,8 +171,11 @@ def release_assignment(assignment_id: str, request: Request, user: User = Depend
     return get_store(request).release_assignment(assignment_id, user)
 
 
+# A plain def, like every other endpoint, so FastAPI runs it in a worker thread. Reading,
+# checking and rewriting a segmentation takes seconds for a real scan; on the event loop
+# that would hold up every other request, a ping included.
 @router.post("/assignments/{assignment_id}/submit", response_model=SubmissionResult)
-async def submit(
+def submit(
     assignment_id: str,
     request: Request,
     metadata: str = Form(..., description="JSON body matching SubmissionRequest"),
@@ -201,7 +204,7 @@ async def submit(
     tmp_path: Path | None = None
     try:
         if segmentation is not None:
-            tmp_path = await _spool_upload(store, segmentation)
+            tmp_path = _spool_upload(store, segmentation)
         outcome = store.submit(
             assignment_id=assignment_id,
             user=user,
@@ -305,14 +308,14 @@ def _require_sent(user: User, what: str, sent: bool) -> None:
         )
 
 
-async def _spool_upload(store: QCStore, upload: UploadFile) -> Path:
+def _spool_upload(store: QCStore, upload: UploadFile) -> Path:
     """Stream an upload to the state folder, refusing anything over the configured cap."""
     tmp_path = store.new_upload_path()
     written = 0
     try:
         with open(tmp_path, "wb") as f:
             while True:
-                chunk = await upload.read(UPLOAD_CHUNK_BYTES)
+                chunk = upload.file.read(UPLOAD_CHUNK_BYTES)
                 if not chunk:
                     break
                 written += len(chunk)
