@@ -721,8 +721,12 @@ segmentations. A reviewer:
    that has been through an editor says so, shows the editor's version, and lists the comments
    so far;
 3. looks at the subject: a 3D view of the bones, and slices of the image with the labels on
-   top. Clicking a label moves to that bone; the eye icon hides it; the target shows it alone.
-   **Outline**, **Distinct colours**, a CT window and a single-plane view help with details;
+   top. The 3D view shows each label as a smoothed surface, as 3D Slicer does, so thick
+   slices do not show as steps. The smoothing moves the surface by less than a voxel and
+   never changes which voxels it encloses, so it neither closes a hole nor loses a thin part;
+   the slices show the voxels as they are. Clicking a label moves to that bone; the eye icon
+   hides it; the target shows it alone. **Outline**, **Distinct colours**, a CT window and a
+   single-plane view help with details;
 4. gives each label a verdict: ✓ accepts it, ✗ rejects it with a reason (*needs correction* or
    *should not be there*). Every label starts accepted. **A bone the segmentation lacks**
    reports a missing bone. A comment explains what is wrong;
@@ -733,8 +737,11 @@ Labels the reviewer did not judge wait for another reviewer. A segmentation that
 its image's voxel grid starts with its labels rejected, so that an editor fixes it.
 
 **Large scans.** Very large CTs are shown at reduced resolution: at most 256 million voxels in
-the slices and 64 million in the 3D view. For example, 0.6 mm slices are shown at 1.2 mm. The
-page says so, and notes it in the reviewer's comment. On the test machine, a 150–450-million-voxel
+the slices. For example, 0.6 mm slices are shown at 1.2 mm. The page says so, and notes it in
+the reviewer's comment. The 3D surfaces take about a second for a pelvis; a segmentation
+whose labels' bounding boxes hold more than 24 million voxels in all, such as a whole body,
+has its surfaces built from every second voxel along its finest axes (every fourth, and so
+on, if that is still too many), which keeps that to a few seconds. On the test machine, a 150–450-million-voxel
 CT took 15–25 seconds to open and used 1.5–3 GB of browser memory. A small scan opens in a few
 seconds.
 

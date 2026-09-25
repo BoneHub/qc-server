@@ -10,11 +10,10 @@
 // Every request says that it comes from a reviewer, so the server refuses the key of an
 // account that is not one.
 //
-// Two NiiVue canvases. The 3D view renders the label volume alone; the slice view shows the
-// image with the labels over it. One canvas cannot do both: NiiVue's 3D rendering draws the
-// labels over the rendered image, so the CT would hide the bones.
+// Two NiiVue canvases. The 3D view shows each segment as a smooth surface, built here from its
+// voxels; the slice view shows the image with the labels over it.
 
-import { Niivue, NVImage, SHOW_RENDER, SLICE_TYPE } from "./vendor/niivue-0.69.0.min.js";
+import { Niivue, NVImage, NVMesh, SHOW_RENDER, SLICE_TYPE } from "./vendor/niivue-0.69.0.min.js";
 
 const KEY_STORAGE = "bonehub_qc_review_key";
 const PREFS_STORAGE = "bonehub_qc_review_prefs";
@@ -42,19 +41,23 @@ const ACCESS_TEXT = {
 const INITIAL_AZIMUTH = 180;
 const INITIAL_ELEVATION = 15;
 
-// Surface shading of the 3D view (NiiVue's gradient lighting, 0..1). Without it a bone renders
-// as a flat silhouette with no depth.
-const RENDER_ILLUMINATION = 0.6;
-
 const NIFTI_INTENT_LABEL = 1002;
 const NIFTI_TYPE_FLOAT32 = 16;
 
-// The most voxels each canvas is given. NiiVue keeps several full-size textures per volume, and
-// in testing a whole-body CT of 450 million voxels failed to display at all while 300 million
-// still worked. A larger scan is shown with every second voxel along its finest axes, and the
-// page says so. The 3D view shows shapes, so it gets a smaller share.
+// The most voxels the slice view is given. NiiVue keeps several full-size textures per volume,
+// and in testing a whole-body CT of 450 million voxels failed to display at all while 300
+// million still worked. A larger scan is shown with every second voxel along its finest axes,
+// and the page says so.
 const MAX_SLICE_VOXELS = 256e6;
-const MAX_3D_VOXELS = 64e6;
+
+// The 3D view's surfaces (see segmentSurface): the Gaussian blur of each segment's distance
+// field, in voxels [within a slice, across slices], and the rounds of Taubin smoothing after.
+// They are built from at most MAX_SURFACE_VOXELS voxels, summed over the segments' bounding
+// boxes -- about four seconds' work: a larger segmentation is built from every second voxel
+// along its finest axes, or every fourth, and so on.
+const SURFACE_BLUR = [1.5, 1];
+const SURFACE_SMOOTHING = 20;
+const MAX_SURFACE_VOXELS = 24e6;
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,9 +76,10 @@ const state = {
   verdicts: new Map(), // label name -> "accept" or "reject", the reviewer's verdict
   reasons: new Map(), // label name -> why a label in the segmentation is rejected: "quality" or "absent"
   missing: new Set(), // bones reported missing that the subject does not list
-  // image and seg2d are on the slice view, seg3d on the 3D view. segRef is the slice view's
-  // mask untouched by hiding; it is on no canvas and answers "which label is here".
-  volumes: { image: null, segRef: null, seg2d: null, seg3d: null },
+  // image and seg2d are on the slice view. segRef is the slice view's mask untouched by
+  // hiding; it is on no canvas and answers "which label is here".
+  volumes: { image: null, segRef: null, seg2d: null },
+  surfaces: new Map(), // segment number -> its surface on the 3D view (an NVMesh)
   sliceFactors: [1, 1, 1], // every n-th voxel of the scan the slice view shows, per axis
   sliceSpacing: null, // [original mm, shown mm] per axis, when the slice view is reduced
   loaded: false, // the subject's views were built, so what is ticked was seen
@@ -367,9 +371,11 @@ function clearViewers() {
     if (!nv) continue;
     nv.broadcastTo([], {});
     for (let i = nv.volumes.length - 1; i >= 0; i--) nv.removeVolumeByIndex(i);
+    for (const mesh of [...nv.meshes]) nv.removeMesh(mesh);
     nv.drawScene();
   }
-  state.volumes = { image: null, segRef: null, seg2d: null, seg3d: null };
+  state.volumes = { image: null, segRef: null, seg2d: null };
+  state.surfaces = new Map();
   state.sliceFactors = [1, 1, 1];
   state.sliceSpacing = null;
   state.loaded = false;
@@ -403,17 +409,28 @@ function hslToRgb(h, s, l) {
   return [f(0), f(8), f(4)];
 }
 
+function topSegmentNumber() {
+  return Math.max(0, ...state.segments.map((segment) => segment.number));
+}
+
 // NiiVue's label lookup table: segment number -> colour, and alpha 0 for what is hidden.
 function labelColormap() {
-  const cm = { R: [0], G: [0], B: [0], A: [0], I: [0], labels: [""] };
-  for (const segment of state.segments) {
-    const [red, green, blue] = displayColor(segment);
+  const cm = { R: [], G: [], B: [], A: [], I: [], labels: [] };
+  const add = (number, [red, green, blue], alpha, label = "") => {
     cm.R.push(red);
     cm.G.push(green);
     cm.B.push(blue);
-    cm.A.push(segmentShown(segment) ? 255 : 0);
-    cm.I.push(segment.number);
-    cm.labels.push(segment.label);
+    cm.A.push(alpha);
+    cm.I.push(number);
+    cm.labels.push(label);
+  };
+  // NiiVue looks a voxel up at no less than 2/256 of the table's width, which in a table of more
+  // than 64 entries is past the background's own entry: the background took segment 1's colour.
+  // Transparent entries below 0 keep the background's entry clear of that.
+  const width = topSegmentNumber() + 1;
+  for (let number = -Math.ceil(width / 127); number <= 0; number++) add(number, [0, 0, 0], 0);
+  for (const segment of state.segments) {
+    add(segment.number, displayColor(segment), segmentShown(segment) ? 255 : 0, segment.label);
   }
   return cm;
 }
@@ -443,12 +460,7 @@ async function buildViews(key, imageBuffer, segBuffer) {
     state.volumes.segRef = segRef;
     state.volumes.seg2d = seg2d;
     nv2d.addVolume(seg2d);
-
-    const seg3d = await resampled(mask, subsampleFactors(mask, MAX_3D_VOXELS), `${key}_labels_3d`, "gray", true);
-    seg3d.setColormapLabel(labelColormap());
-    state.volumes.seg3d = seg3d;
-    nv3d.addVolume(seg3d);
-    await nv3d.setVolumeRenderIllumination(RENDER_ILLUMINATION);
+    await buildSurfaces(key, mask);
   }
   state.sliceFactors = sliceFactors || [1, 1, 1];
   const shown = state.volumes.image || state.volumes.segRef;
@@ -469,7 +481,7 @@ async function buildViews(key, imageBuffer, segBuffer) {
   nv2d.opts.atlasOutline = prefs.outline && hasImage ? 1 : 0;
   if (state.volumes.seg2d) refreshSliceLabels();
   // Clicking in either view moves the crosshair in both.
-  if (state.volumes.seg3d && nv2d.volumes.length) {
+  if (state.surfaces.size && nv2d.volumes.length) {
     nv3d.broadcastTo(nv2d, { crosshair: true });
     nv2d.broadcastTo(nv3d, { crosshair: true });
   }
@@ -560,6 +572,341 @@ async function resampled(volume, factors, name, colormap = "gray", copy = false)
   return NVImage.loadFromUrl({ url: bytes.buffer, name: `${name}.nii`, colormap });
 }
 
+// ------------------------------------------------------------- 3D surfaces
+// The 3D view shows each segment as a smooth surface mesh, as 3D Slicer does, not its voxels:
+// rendered voxel by voxel, a scan's slices -- often 2.5 mm apart -- show as terraces. For each
+// segment: its signed distance to its edge within each slice, which interpolated between slices
+// turns a step from one slice to the next into a slope; that field blurred a little; a surface
+// net where it crosses zero; and a few rounds of Taubin smoothing, which do not shrink it.
+
+// Builds each segment's surface and puts it on the 3D view, saying how far it has got.
+async function buildSurfaces(key, mask) {
+  const top = topSegmentNumber();
+  let source = mask;
+  let boxes = segmentBoxes(mask, top);
+  const factors = surfaceFactors(mask, boxes);
+  if (factors.some((f) => f > 1)) {
+    source = await resampled(mask, factors, `${key}_surfaces`);
+    boxes = segmentBoxes(source, top);
+  }
+  let painted = performance.now();
+  for (const [index, segment] of state.segments.entries()) {
+    if (performance.now() - painted > 100) {
+      showProgress(`Building the 3D view: label ${index + 1} of ${state.segments.length}…`);
+      await nextFrame();
+      painted = performance.now();
+    }
+    const box = boxes.subarray(6 * segment.number, 6 * segment.number + 6);
+    const surface = segmentSurface(source, segment.number, box);
+    if (!surface) continue;
+    const color = new Uint8Array([...displayColor(segment), 255]);
+    const mesh = new NVMesh(surface.positions, surface.triangles, segment.label, color, 1, segmentShown(segment), nv3d.gl);
+    nv3d.addMesh(mesh);
+    state.surfaces.set(segment.number, mesh);
+  }
+}
+
+// Shows the surfaces of the segments shown, in their colours.
+function updateSurfaces() {
+  for (const segment of state.segments) {
+    const mesh = state.surfaces.get(segment.number);
+    if (!mesh) continue;
+    mesh.visible = segmentShown(segment);
+    const color = [...displayColor(segment), 255];
+    if (color.some((c, i) => c !== mesh.rgba255[i])) mesh.setProperty("rgba255", new Uint8Array(color), nv3d.gl);
+  }
+  nv3d.drawScene();
+}
+
+// Voxels of empty margin around each segment's box, room for the blur.
+const SURFACE_MARGIN = Math.ceil(2.5 * Math.max(...SURFACE_BLUR)) + 1;
+
+// Steps [x, y, z] that bring the segments' boxes, with their margins, under MAX_SURFACE_VOXELS in
+// all: the finest axes are halved first, as in subsampleFactors.
+function surfaceFactors(mask, boxes) {
+  const spacing = [1, 2, 3].map((d) => Math.abs(mask.hdr.pixDims[d]) || 1);
+  const factors = [1, 1, 1];
+  const count = () => {
+    let total = 0;
+    for (let b = 6; b < boxes.length; b += 6) {
+      if (boxes[b + 3] < boxes[b]) continue; // no voxels
+      let voxels = 1;
+      for (let axis = 0; axis < 3; axis++) {
+        voxels *= Math.ceil((boxes[b + 3 + axis] - boxes[b + axis] + 1) / factors[axis]) + 2 * SURFACE_MARGIN;
+      }
+      total += voxels;
+    }
+    return total;
+  };
+  while (count() > MAX_SURFACE_VOXELS) {
+    const current = spacing.map((mm, axis) => mm * factors[axis]);
+    const finest = Math.min(...current);
+    for (let axis = 0; axis < 3; axis++) if (current[axis] <= finest * 1.01) factors[axis] *= 2;
+  }
+  return factors;
+}
+
+// The bounding box [x0, y0, z0, x1, y1, z1] of each segment number up to `top`, in voxels, at
+// 6 × its number; x1 < x0 for a number without voxels.
+function segmentBoxes(volume, top) {
+  const [nx, ny, nz] = [1, 2, 3].map((d) => volume.hdr.dims[d]);
+  const img = volume.img;
+  const box = new Int32Array(6 * (top + 1));
+  for (let n = 0; n <= top; n++) box.set([nx, ny, nz, -1, -1, -1], 6 * n);
+  let v = 0;
+  for (let z = 0; z < nz; z++) {
+    for (let y = 0; y < ny; y++) {
+      for (let x = 0; x < nx; x++, v++) {
+        const n = img[v];
+        if (n === 0 || n > top) continue;
+        const b = 6 * n;
+        if (x < box[b]) box[b] = x;
+        if (x > box[b + 3]) box[b + 3] = x;
+        if (y < box[b + 1]) box[b + 1] = y;
+        if (y > box[b + 4]) box[b + 4] = y;
+        if (z < box[b + 2]) box[b + 2] = z;
+        if (z > box[b + 5]) box[b + 5] = z;
+      }
+    }
+  }
+  return box;
+}
+
+// Calls visit(start) with the first voxel of each line along an axis whose voxels are `step`
+// apart and `n` long, in a box of `size` voxels.
+function forEachLine(size, n, step, visit) {
+  for (let outer = 0; outer < size; outer += step * n) {
+    for (let inner = 0; inner < step; inner++) visit(outer + inner);
+  }
+}
+
+// Squared distances along one axis of a box of `dims` voxels, in place: each value becomes the
+// least, over its line, of value + (spacing × distance in voxels)² -- the lower envelope of
+// parabolas of Felzenszwalb and Huttenlocher.
+function distanceAlong(field, dims, axis, spacing) {
+  const n = dims[axis];
+  const step = [1, dims[0], dims[0] * dims[1]][axis];
+  const w2 = spacing * spacing;
+  const f = new Float64Array(n);
+  const v = new Int32Array(n); // the parabolas of the envelope
+  const z = new Float64Array(n + 1); // where each takes over
+  forEachLine(field.length, n, step, (start) => {
+    for (let q = 0; q < n; q++) f[q] = field[start + q * step];
+    let k = 0;
+    v[0] = 0;
+    z[0] = -Infinity;
+    z[1] = Infinity;
+    for (let q = 1; q < n; q++) {
+      let r = v[k];
+      let s = (f[q] + w2 * q * q - f[r] - w2 * r * r) / (2 * w2 * (q - r));
+      while (s <= z[k]) {
+        r = v[--k];
+        s = (f[q] + w2 * q * q - f[r] - w2 * r * r) / (2 * w2 * (q - r));
+      }
+      v[++k] = q;
+      z[k] = s;
+      z[k + 1] = Infinity;
+    }
+    k = 0;
+    for (let q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++;
+      field[start + q * step] = w2 * (q - v[k]) * (q - v[k]) + f[v[k]];
+    }
+  });
+}
+
+// Gaussian blur along one axis of a box of `dims` voxels, in place; sigma in voxels.
+function blurAlong(field, dims, axis, sigma) {
+  const radius = Math.ceil(2.5 * sigma);
+  const weights = new Float32Array(2 * radius + 1);
+  let total = 0;
+  for (let d = -radius; d <= radius; d++) total += weights[d + radius] = Math.exp(-(d * d) / (2 * sigma * sigma));
+  for (let d = 0; d < weights.length; d++) weights[d] /= total;
+  const n = dims[axis];
+  const step = [1, dims[0], dims[0] * dims[1]][axis];
+  const line = new Float32Array(n);
+  forEachLine(field.length, n, step, (start) => {
+    for (let q = 0; q < n; q++) line[q] = field[start + q * step];
+    for (let q = 0; q < n; q++) {
+      let sum = 0;
+      for (let d = -radius; d <= radius; d++) sum += weights[d + radius] * line[Math.min(n - 1, Math.max(0, q + d))];
+      field[start + q * step] = sum;
+    }
+  });
+}
+
+// The 12 edges of a cell of 2 × 2 × 2 voxels, as pairs of corners; corner bit 0 is +x, 1 +y, 2 +z.
+const CELL_EDGES = [];
+for (let a = 0; a < 8; a++) for (const bit of [1, 2, 4]) if (!(a & bit)) CELL_EDGES.push([a, a | bit]);
+
+// The surface of segment `number` of the mask `volume`, in world millimetres, as
+// { positions, triangles }; null when the segment has no voxels. `box` is from segmentBoxes.
+function segmentSurface(volume, number, box) {
+  const [x0, y0, z0, x1, y1, z1] = box;
+  if (x1 < x0) return null;
+  const [nx, ny] = [volume.hdr.dims[1], volume.hdr.dims[2]];
+  const spacing = [1, 2, 3].map((d) => Math.abs(volume.hdr.pixDims[d]) || 1);
+  const img = volume.img;
+  const margin = SURFACE_MARGIN;
+  const dims = [x1 - x0, y1 - y0, z1 - z0].map((extent) => extent + 1 + 2 * margin);
+  const [X, Y, Z] = dims;
+  const size = X * Y * Z;
+  const inside = new Uint8Array(size);
+  for (let z = z0; z <= z1; z++) {
+    for (let y = y0; y <= y1; y++) {
+      const from = nx * (y + ny * z);
+      const to = margin + X * (y - y0 + margin + Y * (z - z0 + margin));
+      for (let x = x0; x <= x1; x++) if (img[from + x] === number) inside[to + x - x0] = 1;
+    }
+  }
+
+  // The signed distance to the segment's edge within each slice across the coarsest axis,
+  // positive inside, up to `reach`; a slice without the segment is all -reach.
+  const across = spacing.lastIndexOf(Math.max(...spacing));
+  const inPlane = [0, 1, 2].filter((axis) => axis !== across);
+  const reach = 4 * spacing[across];
+  const toOutside = new Float32Array(size);
+  const toInside = new Float32Array(size);
+  for (let v = 0; v < size; v++) {
+    toOutside[v] = inside[v] ? reach * reach : 0;
+    toInside[v] = inside[v] ? 0 : reach * reach;
+  }
+  for (const axis of inPlane) {
+    distanceAlong(toOutside, dims, axis, spacing[axis]);
+    distanceAlong(toInside, dims, axis, spacing[axis]);
+  }
+  const exact = toOutside;
+  for (let v = 0; v < size; v++) exact[v] = inside[v] ? Math.sqrt(toOutside[v]) : -Math.sqrt(toInside[v]);
+  // Blurred, which rounds off the pixel steps within a slice and evens out the slices, but held
+  // within `hold` of the exact distance. No voxel is nearer the edge than one pixel, so every
+  // voxel of the segment stays inside the surface and every other voxel outside: the blur can
+  // neither thin a structure away nor fill a hole.
+  const field = toInside;
+  field.set(exact);
+  for (const axis of inPlane) blurAlong(field, dims, axis, SURFACE_BLUR[0]);
+  blurAlong(field, dims, across, SURFACE_BLUR[1]);
+  const hold = 0.75 * Math.min(...inPlane.map((axis) => spacing[axis]));
+  for (let v = 0; v < size; v++) field[v] = Math.min(exact[v] + hold, Math.max(exact[v] - hold, field[v]));
+
+  // A vertex in each cell the surface crosses, at the mean of the points where the field,
+  // linear along each edge of the cell, crosses zero.
+  const [CX, CY, CZ] = [X - 1, Y - 1, Z - 1];
+  const vertexOf = new Int32Array(CX * CY * CZ);
+  const corner = [0, 1, X, X + 1, X * Y, X * Y + 1, X * Y + X, X * Y + X + 1];
+  const points = [];
+  let c = 0;
+  for (let k = 0; k < CZ; k++) {
+    for (let j = 0; j < CY; j++) {
+      for (let i = 0; i < CX; i++, c++) {
+        const p = i + X * (j + Y * k);
+        let mask = 0;
+        for (let q = 0; q < 8; q++) mask |= inside[p + corner[q]] << q;
+        if (mask === 0 || mask === 255) continue;
+        let sx = 0;
+        let sy = 0;
+        let sz = 0;
+        let count = 0;
+        for (const [a, b] of CELL_EDGES) {
+          if (((mask >> a) & 1) === ((mask >> b) & 1)) continue;
+          const fa = field[p + corner[a]];
+          const t = fa / (fa - field[p + corner[b]]);
+          sx += (a & 1) + t * ((b & 1) - (a & 1));
+          sy += ((a >> 1) & 1) + t * (((b >> 1) & 1) - ((a >> 1) & 1));
+          sz += ((a >> 2) & 1) + t * (((b >> 2) & 1) - ((a >> 2) & 1));
+          count++;
+        }
+        vertexOf[c] = points.length / 3;
+        points.push(i + sx / count, j + sy / count, k + sz / count);
+      }
+    }
+  }
+  // A quad across each voxel edge with the segment on one side only, joining the vertices of the
+  // four cells around that edge, wound so that it faces out of the segment.
+  const voxelStep = [1, X, X * Y];
+  const cellStep = [1, CX, CX * CY];
+  const quads = [];
+  c = 0;
+  for (let k = 0; k < CZ; k++) {
+    for (let j = 0; j < CY; j++) {
+      for (let i = 0; i < CX; i++, c++) {
+        const p = i + X * (j + Y * k);
+        const here = inside[p];
+        for (let axis = 0; axis < 3; axis++) {
+          if (inside[p + voxelStep[axis]] === here) continue;
+          const b = cellStep[(axis + 1) % 3];
+          const d = cellStep[(axis + 2) % 3];
+          if (here) quads.push(vertexOf[c], vertexOf[c - b], vertexOf[c - b - d], vertexOf[c - d]);
+          else quads.push(vertexOf[c - d], vertexOf[c - b - d], vertexOf[c - b], vertexOf[c]);
+        }
+      }
+    }
+  }
+
+  // Taubin smoothing: each vertex moved toward, then a little away from, the mean of its
+  // neighbours along the quads' sides.
+  const nVertices = points.length / 3;
+  const first = new Int32Array(nVertices + 1); // vertex v's neighbours: first[v] .. first[v + 1]
+  for (const vertex of quads) first[vertex + 1] += 2;
+  for (let v = 0; v < nVertices; v++) first[v + 1] += first[v];
+  const neighbours = new Int32Array(first[nVertices]);
+  const fill = first.slice(0, nVertices);
+  for (let q = 0; q < quads.length; q += 4) {
+    for (let e = 0; e < 4; e++) {
+      const u = quads[q + e];
+      const w = quads[q + ((e + 1) & 3)];
+      neighbours[fill[u]++] = w;
+      neighbours[fill[w]++] = u;
+    }
+  }
+  let pos = Float32Array.from(points);
+  let next = new Float32Array(pos.length);
+  for (let round = 0; round < 2 * SURFACE_SMOOTHING; round++) {
+    const factor = round % 2 === 0 ? 0.5 : -0.53;
+    for (let v = 0; v < nVertices; v++) {
+      let mx = 0;
+      let my = 0;
+      let mz = 0;
+      for (let e = first[v]; e < first[v + 1]; e++) {
+        const w = 3 * neighbours[e];
+        mx += pos[w];
+        my += pos[w + 1];
+        mz += pos[w + 2];
+      }
+      const n = first[v + 1] - first[v];
+      const o = 3 * v;
+      next[o] = pos[o] + factor * (mx / n - pos[o]);
+      next[o + 1] = pos[o + 1] + factor * (my / n - pos[o + 1]);
+      next[o + 2] = pos[o + 2] + factor * (mz / n - pos[o + 2]);
+    }
+    [pos, next] = [next, pos];
+  }
+
+  // Vertex (i, j, k) is at voxel (x0 - margin + i, ...) of the mask: to world millimetres.
+  const a = volume.hdr.affine;
+  for (let o = 0; o < pos.length; o += 3) {
+    const x = pos[o] + x0 - margin;
+    const y = pos[o + 1] + y0 - margin;
+    const z = pos[o + 2] + z0 - margin;
+    pos[o] = a[0][0] * x + a[0][1] * y + a[0][2] * z + a[0][3];
+    pos[o + 1] = a[1][0] * x + a[1][1] * y + a[1][2] * z + a[1][3];
+    pos[o + 2] = a[2][0] * x + a[2][1] * y + a[2][2] * z + a[2][3];
+  }
+  // An affine that mirrors turns the surface inside out: its quads are wound the other way.
+  const mirrored =
+    a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+      a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+      a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]) <
+    0;
+  const triangles = new Uint32Array((quads.length / 4) * 6);
+  for (let q = 0, t = 0; q < quads.length; q += 4, t += 6) {
+    const [p0, p1, p2, p3] = mirrored
+      ? [quads[q], quads[q + 3], quads[q + 2], quads[q + 1]]
+      : [quads[q], quads[q + 1], quads[q + 2], quads[q + 3]];
+    triangles.set([p0, p1, p2, p0, p2, p3], t);
+  }
+  return { positions: pos, triangles };
+}
+
 // Redraws only the slice view's label layer. NiiVue's updateGLVolume uploads every layer again,
 // the image included, which for a large CT takes seconds; refreshLayers -- internal to NiiVue,
 // but the version is pinned -- redoes the one layer.
@@ -584,16 +931,12 @@ function applyLabelColors() {
   labelUpdatePending = true;
   nextFrame().then(() => {
     labelUpdatePending = false;
-    if (!state.volumes.seg2d && !state.volumes.seg3d) return;
-    syncSliceMask();
     if (state.volumes.seg2d) {
+      syncSliceMask();
       state.volumes.seg2d.setColormapLabel(labelColormap());
       refreshSliceLabels();
     }
-    if (state.volumes.seg3d) {
-      state.volumes.seg3d.setColormapLabel(labelColormap());
-      nv3d.updateGLVolume();
-    }
+    if (state.surfaces.size) updateSurfaces();
   });
 }
 
@@ -615,7 +958,7 @@ function syncSliceMask() {
 }
 
 function applyLayout() {
-  const has3d = !state.handout || !!state.volumes.seg3d;
+  const has3d = !state.handout || state.surfaces.size > 0;
   const layout = has3d ? prefs.layout : "slices";
   $("views").dataset.layout = layout;
   for (const button of document.querySelectorAll("#toolbar [data-layout]")) {
@@ -655,22 +998,27 @@ function labelsCentre() {
   return voxelToMM(volume, box.map(([low, high]) => (low + high) / 2));
 }
 
+// Whether a viewer shows anything: volumes on the slice view, surfaces on the 3D view.
+function hasScene(nv) {
+  return !!nv && (nv.volumes.length > 0 || nv.meshes.length > 0);
+}
+
 function resetView() {
   for (const nv of [nv2d, nv3d]) {
-    if (!nv || !nv.volumes.length) continue;
+    if (!hasScene(nv)) continue;
     nv.scene.pan2Dxyzmm = [0, 0, 0, 1];
     nv.scene.volScaleMultiplier = 1;
     nv.scene.crosshairPos = [0.5, 0.5, 0.5];
   }
-  if (nv3d && nv3d.volumes.length) nv3d.setRenderAzimuthElevation(INITIAL_AZIMUTH, INITIAL_ELEVATION);
+  if (hasScene(nv3d)) nv3d.setRenderAzimuthElevation(INITIAL_AZIMUTH, INITIAL_ELEVATION);
   // Land on the bones rather than on the middle of the scan, which may be empty.
   const centre = labelsCentre();
   if (centre) {
     moveCrosshair(centre);
     return;
   }
-  for (const nv of [nv2d, nv3d]) if (nv && nv.volumes.length) nv.drawScene();
-  if (nv2d && nv2d.volumes.length) nv2d.createOnLocationChange();
+  for (const nv of [nv2d, nv3d]) if (hasScene(nv)) nv.drawScene();
+  if (hasScene(nv2d)) nv2d.createOnLocationChange();
 }
 
 // World (RAS) millimetres of a voxel given in the file's own index order.
@@ -681,14 +1029,14 @@ function voxelToMM(volume, [i, j, k]) {
 
 function moveCrosshair(mm) {
   for (const nv of [nv2d, nv3d]) {
-    if (!nv || !nv.volumes.length) continue;
+    if (!hasScene(nv)) continue;
     // True world coordinates, as NiiVue reports locations. Without the flag NiiVue maps through
     // its axis-aligned stand-in for the volume, which misplaces the point in an oblique scan.
     nv.scene.crosshairPos = nv.mm2frac(mm, 0, true);
     nv.drawScene();
   }
-  const reporter = nv2d && nv2d.volumes.length ? nv2d : nv3d;
-  if (reporter && reporter.volumes.length) reporter.createOnLocationChange();
+  const reporter = hasScene(nv2d) ? nv2d : nv3d;
+  if (hasScene(reporter)) reporter.createOnLocationChange();
 }
 
 // A voxel of the segment near the middle of its bounding box: the middle of the box itself
