@@ -51,17 +51,25 @@ services:
       # in the credentials volume. The generated admin key is printed once, at that start.
       BONEHUB_QC_ADMIN_KEY: "${BONEHUB_QC_ADMIN_KEY:-}"
       BONEHUB_QC_PRIVATE_KEY: "${BONEHUB_QC_PRIVATE_KEY:-}"
-      # Queue policy. Anything in QCServerConfig can be set as BONEHUB_QC_<FIELD>. A value
-      # set here wins over the admin panel at every start; blank leaves the setting to the
-      # admin panel, starting from the server's default.
+      # Policy: every setting of the admin panel's Policy section, and the datasets. Anything
+      # in QCServerConfig can be set as BONEHUB_QC_<FIELD>, but only the names listed here
+      # reach the container. A value set here wins over the admin panel at every start;
+      # blank leaves the setting to the admin panel, starting from the server's default.
       # Blank means every dataset under the root; "none" resets a previously saved value.
       BONEHUB_QC_ALLOWED_DATASET_IDS: "${BONEHUB_QC_ALLOWED_DATASET_IDS:-}"
       # Label statuses that queue a subject: 1 = not reviewed yet (2 = already reviewed).
       BONEHUB_QC_ELIGIBLE_LABEL_VALUES: "${BONEHUB_QC_ELIGIBLE_LABEL_VALUES:-}"
       BONEHUB_QC_LEASE_TTL_SECONDS: "${BONEHUB_QC_LEASE_TTL_SECONDS:-}"
       BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER: "${BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER:-}"
+      # "sequential" hands out the lowest free subject, "random" a free subject at random.
+      BONEHUB_QC_ASSIGNMENT_STRATEGY: "${BONEHUB_QC_ASSIGNMENT_STRATEGY:-}"
       # Whether an editor's corrections go back to a reviewer.
       BONEHUB_QC_EDITS_NEED_REVIEW: "${BONEHUB_QC_EDITS_NEED_REVIEW:-}"
+      # Also queue subjects with an image but no segmentation, for editors.
+      BONEHUB_QC_INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION: "${BONEHUB_QC_INCLUDE_SUBJECTS_WITHOUT_SEGMENTATION:-}"
+      BONEHUB_QC_MARK_REMOVED_LABELS_ABSENT: "${BONEHUB_QC_MARK_REMOVED_LABELS_ABSENT:-}"
+      BONEHUB_QC_REQUIRE_GEOMETRY_MATCH: "${BONEHUB_QC_REQUIRE_GEOMETRY_MATCH:-}"
+      BONEHUB_QC_KEEP_SEGMENTATION_BACKUPS: "${BONEHUB_QC_KEEP_SEGMENTATION_BACKUPS:-}"
     restart: unless-stopped
 
 volumes:

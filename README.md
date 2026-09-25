@@ -345,11 +345,10 @@ You can change a setting in two places:
   setting blank in `.env` to manage it from the panel. `.env.example` leaves every setting
   blank.
 
-`docker-compose.yml` passes only some variables to the server:
-`BONEHUB_QC_ELIGIBLE_LABEL_VALUES`, `BONEHUB_QC_LEASE_TTL_SECONDS`,
-`BONEHUB_QC_MAX_CONCURRENT_ASSIGNMENTS_PER_USER`, `BONEHUB_QC_EDITS_NEED_REVIEW`,
-`BONEHUB_QC_ALLOWED_DATASET_IDS` and the keys. To set any other setting from `.env`, also add
-it to the `environment:` block of `docker-compose.yml`, the same way as the others.
+`docker-compose.yml` passes every setting of the panel's Policy section to the server, and
+`BONEHUB_QC_ALLOWED_DATASET_IDS` and the keys. It does not pass `INDEX_REFRESH_SECONDS` or
+`MAX_UPLOAD_BYTES`: to set one of them from `.env`, also add it to the `environment:` block of
+`docker-compose.yml`, the same way as the others.
 
 ### All settings
 

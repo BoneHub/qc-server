@@ -167,6 +167,32 @@ class DeploymentFileTests(unittest.TestCase):
     def test_the_dockerfile_only_sets_variables_that_exist(self):
         self.assert_names_are_real(PROJECT_ROOT / "Dockerfile")
 
+    def offered_by_env_example(self) -> set:
+        """Config fields .env.example has a line for."""
+        fields = set(QCServerConfig.model_fields)
+        text = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+        return {name for name in re.findall(rf"(?m)^{ENV_PREFIX}([A-Z0-9_]+)=", text) if name.lower() in fields}
+
+    def passed_by_compose(self) -> set:
+        """Names docker-compose.yml hands from .env to the container."""
+        compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        return set(re.findall(rf'(?m)^\s+{ENV_PREFIX}([A-Z0-9_]+): "\$\{{{ENV_PREFIX}\1:-\}}"$', compose))
+
+    def test_docker_compose_passes_on_every_policy_the_env_example_offers(self):
+        """Compose reads .env for substitution only; a name missing from ``environment:`` is dropped."""
+        missing = self.offered_by_env_example() - self.passed_by_compose()
+        self.assertEqual(missing, set(), "docker-compose.yml does not pass these on to the container")
+
+    def test_every_setting_of_the_admin_panel_can_be_set_from_the_env(self):
+        """The Policy section's settings, as the panel saves them, are offered in .env.example and passed on."""
+        admin = (PROJECT_ROOT / "qc_server" / "static" / "admin.html").read_text(encoding="utf-8")
+        payload = re.search(r'api\("PUT", "/admin/api/config", \{(.*?)\}\)', admin, re.S)
+        self.assertIsNotNone(payload, "admin.html no longer saves the policy the way this test reads it")
+        in_panel = {name.upper() for name in re.findall(r"(?m)^\s*(\w+):", payload.group(1))}
+        self.assertIn("ASSIGNMENT_STRATEGY", in_panel, "the Policy section's fields were not read")
+        self.assertEqual(in_panel - self.offered_by_env_example(), set(), ".env.example has no line for these")
+        self.assertEqual(in_panel - self.passed_by_compose(), set(), "docker-compose.yml does not pass these on")
+
     def test_the_dataset_is_mounted_where_the_image_expects_it(self):
         compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
         self.assertIn("BONEHUB_QC_DATASET_ROOT: /data", compose)
