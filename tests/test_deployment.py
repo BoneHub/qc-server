@@ -35,6 +35,7 @@ NON_CONFIG_ENV_NAMES = {
     "PORT",
     "ADMIN_KEY",
     "PRIVATE_KEY",
+    "TIMEZONE",  # read by Compose alone, which passes it to the container as TZ
 }
 
 
