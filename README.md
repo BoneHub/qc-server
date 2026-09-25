@@ -98,7 +98,7 @@ git clone https://github.com/BoneHub/qc-server.git
 cd qc-server
 cp .env.example .env                          # then edit .env: say where the dataset is
 docker compose up -d --build
-docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
+docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key # get the admin key if you have not already set in .env
 ```
 
 Then open `http://<host>:8000/admin` and sign in with that key. `<host>` is the name or IP
