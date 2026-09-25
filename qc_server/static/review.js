@@ -13,7 +13,7 @@
 // Two NiiVue canvases. The 3D view shows each segment as a smooth surface, built here from its
 // voxels; the slice view shows the image with the labels over it.
 
-import { Niivue, NVImage, NVMesh, SHOW_RENDER, SLICE_TYPE } from "./vendor/niivue-0.69.0.min.js";
+import { DRAG_MODE, Niivue, NVImage, NVMesh, SHOW_RENDER, SLICE_TYPE } from "./vendor/niivue-0.69.0.min.js";
 
 const KEY_STORAGE = "bonehub_qc_review_key";
 const PREFS_STORAGE = "bonehub_qc_review_prefs";
@@ -40,6 +40,10 @@ const ACCESS_TEXT = {
 // Starting 3D viewpoint: from the front, slightly above.
 const INITIAL_AZIMUTH = 180;
 const INITIAL_ELEVATION = 15;
+
+// How far the 3D view zooms, [out, in], and the pixels of a right drag that double or halve it.
+const ZOOM_3D = [0.5, 10];
+const ZOOM_3D_DRAG = 100;
 
 const NIFTI_INTENT_LABEL = 1002;
 const NIFTI_TYPE_FLOAT32 = 16;
@@ -348,16 +352,30 @@ async function createViewers() {
     isColorbar: false,
     crosshairColor: [1, 0.78, 0.2, 1],
   };
-  nv3d = new Niivue({ ...common, show3Dcrosshair: true, isOrientCube: true, backColor: [0.04, 0.045, 0.05, 1] });
+  nv3d = new Niivue({
+    ...common,
+    show3Dcrosshair: true,
+    isOrientCube: true,
+    backColor: [0.04, 0.045, 0.05, 1],
+    // A left drag rotates, as NiiVue does it; the right and middle buttons are the page's own
+    // (see wire3DView), so NiiVue leaves them alone.
+    dragMode: DRAG_MODE.none,
+    mouseEventConfig: { centerButton: DRAG_MODE.none },
+  });
   nv2d = new Niivue({
     ...common,
     multiplanarShowRender: SHOW_RENDER.NEVER,
     // The patient's right on the screen's left, as in 3D Slicer and on a radiology workstation.
     isRadiologicalConvention: true,
     backColor: [0, 0, 0, 1],
+    // A left drag moves the crosshair, a right drag zooms about it, a middle drag pans. Panning
+    // is set for the middle button alone: as the dragMode, it would turn the wheel into a zoom.
+    dragMode: DRAG_MODE.slicer3D,
+    mouseEventConfig: { centerButton: DRAG_MODE.pan },
   });
   await nv3d.attachToCanvas($("view3d"));
   await nv2d.attachToCanvas($("view2d"));
+  wire3DView();
   nv3d.setSliceType(SLICE_TYPE.RENDER);
   nv2d.setSliceType(PLANES[prefs.plane] ?? SLICE_TYPE.MULTIPLANAR);
   // Voxels drawn as voxels: a mask's edge is what is being judged, so it must not be blurred.
@@ -903,6 +921,106 @@ function segmentSurface(volume, number, box) {
   return { positions: pos, triangles };
 }
 
+// ---------------------------------------------------------- 3D pan and zoom
+// NiiVue zooms the 3D view with the wheel, no further than 2×, and cannot pan it; the page does
+// both itself. Panning moves the view's centre, which the view also turns about, as in 3D
+// Slicer. It goes into NiiVue's `position` -- internal, but the version is pinned -- which
+// shifts the scene once it is turned, in millimetres: x to the screen's left, y up, z towards
+// the eye.
+
+// The point at the 3D view's centre, in millimetres from the middle of the scene.
+let centre3D = [0, 0, 0];
+
+// Half the 3D view's shorter side in millimetres, as NiiVue sets its projection.
+function viewRadius3D() {
+  return (0.8 * nv3d.furthestFromPivot) / nv3d.scene.volScaleMultiplier;
+}
+
+// How NiiVue turns the scene for the 3D view, as the rows of a matrix: by the azimuth about the
+// z axis, then by the elevation about the x axis.
+function rotation3D() {
+  const a = ((nv3d.scene.renderAzimuth - 180) * Math.PI) / 180;
+  const e = ((270 - nv3d.scene.renderElevation) * Math.PI) / 180;
+  const [ca, sa, ce, se] = [Math.cos(a), Math.sin(a), Math.cos(e), Math.sin(e)];
+  return [
+    [ca, -sa, 0],
+    [ce * sa, ce * ca, -se],
+    [se * sa, se * ca, ce],
+  ];
+}
+
+// Shifts the turned scene so that centre3D is in the middle of the view. NiiVue draws what lies
+// 0.01 to 8 view radii in front of the eye and puts the scene 1.8 in, so that zoomed in, the
+// near side of what is looked at would be cut off: it is moved back to 4, the middle.
+function centreScene3D() {
+  const [x, y, z] = rotation3D().map((row) => -(row[0] * centre3D[0] + row[1] * centre3D[1] + row[2] * centre3D[2]));
+  nv3d.position = [x, y, z - 2.2 * viewRadius3D()];
+}
+
+// Pans the 3D view to `centre`, zooms it to `scale`, and draws it.
+function place3D(centre, scale) {
+  centre3D = centre;
+  nv3d.scene.volScaleMultiplier = Math.min(ZOOM_3D[1], Math.max(ZOOM_3D[0], scale));
+  centreScene3D();
+  nv3d.drawScene();
+}
+
+// A middle drag pans the 3D view and a right drag zooms it, dragging down to zoom in as on the
+// slices. The wheel zooms it in NiiVue's steps, but as far as a drag does: it is taken before
+// it reaches NiiVue.
+function wire3DView() {
+  const canvas = $("view3d");
+  // NiiVue calls this as the view turns, before it draws.
+  nv3d.onAzimuthElevationChange = centreScene3D;
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    const bit = { 1: 4, 2: 2 }[event.button]; // the button's bit in event.buttons
+    if (!bit || drag || !hasScene(nv3d)) return;
+    canvas.setPointerCapture(event.pointerId);
+    drag = {
+      pointer: event.pointerId,
+      bit,
+      x: event.clientX,
+      y: event.clientY,
+      centre: centre3D,
+      scale: nv3d.scene.volScaleMultiplier,
+    };
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!drag || event.pointerId !== drag.pointer) return;
+    if (!(event.buttons & drag.bit)) {
+      drag = null; // let go while another button is held
+      return;
+    }
+    const dx = event.clientX - drag.x;
+    const dy = event.clientY - drag.y;
+    if (drag.bit === 2) {
+      place3D(drag.centre, drag.scale * 2 ** (dy / ZOOM_3D_DRAG));
+    } else {
+      // The centre moves against the drag. The screen's right and down are the turned scene's
+      // -x and -y, and back in the scene's own axes through the rotation's transpose.
+      const mm = (2 * viewRadius3D()) / Math.min(canvas.clientWidth, canvas.clientHeight);
+      const r = rotation3D();
+      place3D(drag.centre.map((c, i) => c + (r[0][i] * dx + r[1][i] * dy) * mm), drag.scale);
+    }
+  });
+  const end = (event) => {
+    if (drag && event.pointerId === drag.pointer) drag = null;
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("lostpointercapture", end);
+  canvas.parentElement.addEventListener(
+    "wheel",
+    (event) => {
+      if (event.target !== canvas || !hasScene(nv3d)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.deltaY) place3D(centre3D, nv3d.scene.volScaleMultiplier * (event.deltaY > 0 ? 1.1 : 1 / 1.1));
+    },
+    { capture: true, passive: false },
+  );
+}
+
 // Redraws only the slice view's label layer. NiiVue's updateGLVolume uploads every layer again,
 // the image included, which for a large CT takes seconds; refreshLayers -- internal to NiiVue,
 // but the version is pinned -- redoes the one layer.
@@ -1006,7 +1124,10 @@ function resetView() {
     nv.scene.volScaleMultiplier = 1;
     nv.scene.crosshairPos = [0.5, 0.5, 0.5];
   }
-  if (hasScene(nv3d)) nv3d.setRenderAzimuthElevation(INITIAL_AZIMUTH, INITIAL_ELEVATION);
+  if (hasScene(nv3d)) {
+    nv3d.setRenderAzimuthElevation(INITIAL_AZIMUTH, INITIAL_ELEVATION);
+    place3D([0, 0, 0], 1); // after a draw, which measured the scene
+  }
   // Land on the bones rather than on the middle of the scan, which may be empty.
   const centre = labelsCentre();
   if (centre) {
