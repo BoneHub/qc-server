@@ -738,7 +738,8 @@ segmentations. A reviewer:
    *should not be there*). Every label starts accepted. **A bone the segmentation lacks**
    reports a missing bone. A comment explains what is wrong;
 5. presses **Accept** (or **Send to editors**, when something is rejected or missing),
-   **Reject subject** (rejects every label under review), or **Release** (hands it back).
+   **Reject subject** (rejects every label under review), or **Release** (hands it back; the
+   reviewer is offered it again only once nothing else is waiting for them).
 
 Labels the reviewer did not judge wait for another reviewer. A segmentation that is not on
 its image's voxel grid starts with its labels rejected, so that an editor fixes it.

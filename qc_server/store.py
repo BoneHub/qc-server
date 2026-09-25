@@ -732,7 +732,8 @@ class QCStore:
 
     def _candidates(self, user: User, role: str) -> list[tuple[SubjectRef, Case | None]]:
         """Caller holds the lock. The subjects this user could be handed in this role, in order:
-        those in progress at the role's stage, then those nobody has given a verdict on."""
+        those in progress at the role's stage, then those nobody has given a verdict on, then
+        those this user released."""
         stage = workflow.STAGE_OF_ROLE[role]
         in_progress: list[tuple[SubjectRef, Case | None]] = []
         for case in self._cases.values():
@@ -759,7 +760,17 @@ class QCStore:
         if self.config.assignment_strategy == "random":
             random.shuffle(in_progress)
             random.shuffle(fresh)
-        return in_progress + fresh
+
+        # What this user released goes last for them, so Release skips a subject rather than
+        # handing it straight back. The sort is stable: the order above holds otherwise.
+        released = {
+            a.subject_key
+            for a in self._assignments.values()
+            if a.user == user.name and a.role == role and a.state == "released"
+        }
+        candidates = in_progress + fresh
+        candidates.sort(key=lambda item: item[0].subject_key in released)
+        return candidates
 
     def get_assignment(self, assignment_id: str, user: User | None = None) -> Assignment:
         with self._lock:

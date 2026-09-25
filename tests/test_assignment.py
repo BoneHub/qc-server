@@ -110,8 +110,15 @@ class LeaseTests(QCTestCase):
         self.assertEqual(released.state, "released")
         self.assertEqual(self.store.next_subject(self.bob, REVIEWER).subject_key, assignment.subject_key)
 
-    def test_a_released_subject_can_come_back_to_the_same_reviewer(self):
+    def test_a_released_subject_goes_to_the_back_of_the_same_reviewers_queue(self):
+        """Release skips a subject: the reviewer is handed the next one, not the same again."""
         assignment = self.store.next_subject(self.alice, REVIEWER)
+        self.store.release_assignment(assignment.assignment_id, self.alice)
+        self.assertNotEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, assignment.subject_key)
+
+    def test_a_released_subject_comes_back_once_nothing_else_is_waiting(self):
+        assignment = self.store.next_subject(self.alice, REVIEWER)
+        self.store.next_subject(self.bob, REVIEWER)  # the only other subject is out
         self.store.release_assignment(assignment.assignment_id, self.alice)
         self.assertEqual(self.store.next_subject(self.alice, REVIEWER).subject_key, assignment.subject_key)
 
