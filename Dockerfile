@@ -25,7 +25,7 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY pyproject.toml README.md ./
-COPY bonehub_quality_check_server ./bonehub_quality_check_server
+COPY qc_server ./qc_server
 
 RUN pip install --no-cache-dir . \
     && apt-get purge -y git \

@@ -17,11 +17,11 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
-from bonehub_quality_check_server import auth
-from bonehub_quality_check_server.app import create_app
-from bonehub_quality_check_server.config import ENV_PREFIX
-from bonehub_quality_check_server.models import REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server import auth
+from qc_server.app import create_app
+from qc_server.config import ENV_PREFIX
+from qc_server.models import REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase, close_logging
 

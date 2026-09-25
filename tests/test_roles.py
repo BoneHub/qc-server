@@ -19,14 +19,14 @@ import io
 import logging
 import unittest
 
-from bonehub_quality_check_server import api
-from bonehub_quality_check_server import client as reference_client
-from bonehub_quality_check_server.__main__ import main
-from bonehub_quality_check_server.client import BoneHubQCClient, QCClientError
-from bonehub_quality_check_server.config import QCServerConfig
-from bonehub_quality_check_server.models import EDITOR, REVIEWER, ROLES
-from bonehub_quality_check_server.review import STATIC_DIR
-from bonehub_quality_check_server.store import QCError
+from qc_server import api
+from qc_server import client as reference_client
+from qc_server.__main__ import main
+from qc_server.client import BoneHubQCClient, QCClientError
+from qc_server.config import QCServerConfig
+from qc_server.models import EDITOR, REVIEWER, ROLES
+from qc_server.review import STATIC_DIR
+from qc_server.store import QCError
 
 from tests.support import QCTestCase, labels_in_mask
 from tests.test_api import ApiTestCase
@@ -390,7 +390,7 @@ class CommandLineTests(QCTestCase):
 
     def tearDown(self) -> None:
         # The CLI opens stores of its own; close their log files so Windows lets the folder go.
-        prefix = f"bonehub_quality_check_server.{self.state_root.resolve().as_posix()}"
+        prefix = f"qc_server.{self.state_root.resolve().as_posix()}"
         for name in [n for n in list(logging.Logger.manager.loggerDict) if n.startswith(prefix)]:
             logger = logging.getLogger(name)
             for handler in list(logger.handlers):

@@ -19,10 +19,10 @@ from unittest import mock
 
 import uvicorn
 
-from bonehub_quality_check_server import client as client_module
-from bonehub_quality_check_server.app import create_app
-from bonehub_quality_check_server.client import REVIEWER, BoneHubQCClient, QCClientError
-from bonehub_quality_check_server.models import SubmissionRequest
+from qc_server import client as client_module
+from qc_server.app import create_app
+from qc_server.client import REVIEWER, BoneHubQCClient, QCClientError
+from qc_server.models import SubmissionRequest
 
 from tests.support import QCTestCase
 

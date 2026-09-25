@@ -6,7 +6,7 @@ import json
 import os
 import unittest
 
-from bonehub_quality_check_server.config import (
+from qc_server.config import (
     DEFAULT_CREDENTIALS_DIR,
     ENV_PREFIX,
     QCServerConfig,

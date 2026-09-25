@@ -1,4 +1,4 @@
-# BoneHub Dataset Quality Check — Server
+# BoneHub Quality Check — Server
 
 This server runs a human quality check of the segmentations in a
 [BoneHub Dataset](https://github.com/BoneHub/BoneHub-Dataset). It hands out subjects one at a
@@ -37,7 +37,7 @@ local disk or an SMB share.
 | --- | --- | --- |
 | Administrator | the admin panel, `http://<host>:8000/admin` | creates users, follows progress, approves results |
 | Reviewer | the review page, `http://<host>:8000/review`, in any modern browser; nothing to install | accepts or rejects each label, reports missing bones |
-| Editor | 3D Slicer, with the [BoneHub Quality Check extension](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension) | corrects rejected labels, adds missing bones, segments subjects that have no segmentation |
+| Editor | 3D Slicer, with the [BoneHub Quality Check extension](https://github.com/BoneHub/qc-slicer) | corrects rejected labels, adds missing bones, segments subjects that have no segmentation |
 
 One person can be both a reviewer and an editor. The server never asks anyone to review their
 own correction.
@@ -94,8 +94,8 @@ a comment. It then shows as *escalated*.
 ### Steps
 
 ```bash
-git clone https://github.com/BoneHub/bonehub_dataset_quality_check_server.git
-cd bonehub_dataset_quality_check_server
+git clone https://github.com/BoneHub/qc-server.git
+cd qc-server
 cp .env.example .env                          # then edit .env: say where the dataset is
 docker compose up -d --build
 docker compose logs | grep -A2 "admin key"    # a new server prints its admin key once
@@ -160,7 +160,7 @@ state an older one left behind, start a
    - send a reviewer their **invite link**, which opens the review page already signed in;
    - send an editor their **key** and the server's address, `http://<host>:8000`.
 5. **Editors install the extension.** Its
-   [README](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension)
+   [README](https://github.com/BoneHub/qc-slicer)
    explains how.
 6. **If users connect from outside a trusted network, put HTTPS in front of the server.** Keys
    and images travel with every request.
@@ -737,7 +737,7 @@ seconds.
 ### Editors: 3D Slicer
 
 Editors need 3D Slicer 5.6 or newer and the
-[BoneHub Quality Check extension](https://github.com/BoneHub/bonehub_dataset_quality_check_3dslicer_extension),
+[BoneHub Quality Check extension](https://github.com/BoneHub/qc-slicer),
 whose README covers installing and using it. In short, an editor:
 
 1. enters the server address and their key, and presses **Connect**;
@@ -834,13 +834,13 @@ naming the problem.
 
 ### Reference client
 
-[`client.py`](bonehub_quality_check_server/client.py) is a dependency-free reference client for
+[`client.py`](qc_server/client.py) is a dependency-free reference client for
 the API. It is the file shipped inside the Slicer extension. It works as an editor unless it is
 given `role="reviewer"`:
 
 ```python
 from pathlib import Path
-from bonehub_quality_check_server.client import BoneHubQCClient
+from qc_server.client import BoneHubQCClient
 
 editor = BoneHubQCClient("http://localhost:8000", "bhqc_...")
 handout = editor.next_subject()
@@ -859,7 +859,7 @@ reviewer.submit(handout["assignment_id"], quality_check_confirmed=True, use_stor
 ### Updating NiiVue
 
 The review page draws with [NiiVue](https://github.com/niivue/niivue), vendored as one
-self-contained file in `bonehub_quality_check_server/static/vendor/` (BSD-2-Clause; its license
+self-contained file in `qc_server/static/vendor/` (BSD-2-Clause; its license
 is next to it), so the page works on networks that cannot reach a CDN. To update it:
 
 ```bash

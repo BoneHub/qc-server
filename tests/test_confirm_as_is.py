@@ -13,8 +13,8 @@ import json
 import unittest
 
 from bonehub_data_schema import write_segmentation
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server.models import EDITOR, REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase, reference_image, segmentation_array, write_mask
 from tests.test_api import ApiTestCase

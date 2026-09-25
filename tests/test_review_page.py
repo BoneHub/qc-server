@@ -18,10 +18,10 @@ from pathlib import Path
 import numpy as np
 import SimpleITK as sitk
 
-from bonehub_quality_check_server.config import QCServerConfig
-from bonehub_quality_check_server.models import REJECT_REASONS, SubmissionRequest
-from bonehub_quality_check_server.review import STATIC_DIR
-from bonehub_quality_check_server.segmentation import SegmentationError, read_segment_table
+from qc_server.config import QCServerConfig
+from qc_server.models import REJECT_REASONS, SubmissionRequest
+from qc_server.review import STATIC_DIR
+from qc_server.segmentation import SegmentationError, read_segment_table
 
 from tests.support import LABEL_VALUE, QCTestCase, segment_header, write_mask, write_raw_mask
 from tests.test_api import ApiTestCase
@@ -86,8 +86,8 @@ class VendoredNiivueTests(unittest.TestCase):
     def test_every_static_file_is_installed_with_the_package(self):
         """setuptools installs only what package-data names; the Docker image is built with pip."""
         pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        line = re.search(r"^bonehub_quality_check_server\s*=\s*\[(.*)\]", pyproject, re.M)
-        self.assertIsNotNone(line, "no package-data entry for bonehub_quality_check_server")
+        line = re.search(r"^qc_server\s*=\s*\[(.*)\]", pyproject, re.M)
+        self.assertIsNotNone(line, "no package-data entry for qc_server")
         patterns = re.findall(r'"([^"]+)"', line.group(1))
         missing = [
             path.relative_to(PACKAGE_DIR).as_posix()

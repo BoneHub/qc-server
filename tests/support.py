@@ -39,11 +39,11 @@ from bonehub_data_schema import (
 )
 from bonehub_data_schema.bonehub_dataset_io import DATASET_ZFILL, SUBJECT_ZFILL
 
-from bonehub_quality_check_server import auth
-from bonehub_quality_check_server.audit import AuditLog
-from bonehub_quality_check_server.config import ENV_PREFIX, QCServerConfig
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
-from bonehub_quality_check_server.store import QCStore
+from qc_server import auth
+from qc_server.audit import AuditLog
+from qc_server.config import ENV_PREFIX, QCServerConfig
+from qc_server.models import EDITOR, REVIEWER
+from qc_server.store import QCStore
 
 
 def _silence_audit_console() -> None:

@@ -9,8 +9,8 @@ from __future__ import annotations
 import unittest
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
-from bonehub_quality_check_server.config import QCServerConfig
-from bonehub_quality_check_server.models import REVIEWER
+from qc_server.config import QCServerConfig
+from qc_server.models import REVIEWER
 
 from tests.support import QCTestCase
 
@@ -191,7 +191,7 @@ class MalformedDatasetTests(QCTestCase):
     def test_a_dataset_root_that_does_not_exist_is_refused(self):
         with self.assertRaises(RuntimeError):
             self.track(
-                __import__("bonehub_quality_check_server.store", fromlist=["QCStore"]).QCStore(
+                __import__("qc_server.store", fromlist=["QCStore"]).QCStore(
                     dataset_root=self.tmp_path / "nowhere",
                     credentials_dir=self.credentials_dir,
                 )

@@ -40,7 +40,7 @@ class AuditLog:
         self._dataset_loggers: dict[int, logging.Logger] = {}
 
         state_dir.mkdir(parents=True, exist_ok=True)
-        self.logger = logging.getLogger(f"bonehub_quality_check_server.{state_dir.resolve().as_posix()}")
+        self.logger = logging.getLogger(f"qc_server.{state_dir.resolve().as_posix()}")
         self.logger.propagate = False
         if not self.logger.handlers:
             handler = logging.FileHandler(state_dir / SERVER_LOG_NAME, encoding="utf-8")

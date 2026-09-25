@@ -12,10 +12,10 @@ import contextlib
 import io
 import unittest
 
-from bonehub_quality_check_server.__main__ import main
-from bonehub_quality_check_server.config import QCServerConfig
-from bonehub_quality_check_server.models import EDITOR, REVIEWER, User
-from bonehub_quality_check_server.store import QCError
+from qc_server.__main__ import main
+from qc_server.config import QCServerConfig
+from qc_server.models import EDITOR, REVIEWER, User
+from qc_server.store import QCError
 
 from tests.support import QCTestCase
 from tests.test_api import ApiTestCase

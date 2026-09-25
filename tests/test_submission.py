@@ -20,10 +20,10 @@ import numpy as np
 import SimpleITK as sitk
 
 from bonehub_data_schema import read_segmentation_labels
-from bonehub_quality_check_server import store as store_module
-from bonehub_quality_check_server import workflow
-from bonehub_quality_check_server.models import EDITOR, REVIEWER, Case, CaseLabel
-from bonehub_quality_check_server.store import QCError
+from qc_server import store as store_module
+from qc_server import workflow
+from qc_server.models import EDITOR, REVIEWER, Case, CaseLabel
+from qc_server.store import QCError
 
 from tests.support import LABEL_VALUE, QCTestCase, labels_in_mask, segment_header, write_image, write_mask, write_raw_mask
 
@@ -509,8 +509,8 @@ class RefusedReplaceTests(QCTestCase):
                 raise PermissionError(13, "Access is denied")
             real_replace(source, target)
 
-        with mock.patch("bonehub_quality_check_server.store.os.replace", side_effect=refuse_twice), mock.patch(
-            "bonehub_quality_check_server.store.time.sleep"
+        with mock.patch("qc_server.store.os.replace", side_effect=refuse_twice), mock.patch(
+            "qc_server.store.time.sleep"
         ):
             store.approve(KEY)
         self.assertEqual(len(refused), 2)
@@ -520,8 +520,8 @@ class RefusedReplaceTests(QCTestCase):
         source = self.tmp_path / "new.json"
         source.write_text("{}", encoding="utf-8")
         with mock.patch(
-            "bonehub_quality_check_server.store.os.replace", side_effect=PermissionError(13, "Access is denied")
-        ), mock.patch("bonehub_quality_check_server.store.time.sleep") as sleep:
+            "qc_server.store.os.replace", side_effect=PermissionError(13, "Access is denied")
+        ), mock.patch("qc_server.store.time.sleep") as sleep:
             with self.assertRaises(PermissionError):
                 store_module._replace(source, self.tmp_path / "target.json")
         self.assertEqual(sleep.call_count, len(store_module._REPLACE_RETRY_DELAYS))

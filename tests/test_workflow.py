@@ -20,9 +20,9 @@ import json
 import unittest
 from unittest import mock
 
-from bonehub_quality_check_server import segmentation as segmentation_module
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server import segmentation as segmentation_module
+from qc_server.models import EDITOR, REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase, labels_in_mask, write_mask
 
@@ -313,7 +313,7 @@ class EditTests(WorkflowTestCase):
 
     def test_an_upload_the_server_cannot_compare_counts_as_changing_everything(self):
         """Without the comparison, keeping an acceptance would be a guess."""
-        with mock.patch("bonehub_quality_check_server.store.changed_labels", return_value=None) as compare:
+        with mock.patch("qc_server.store.changed_labels", return_value=None) as compare:
             self.edit(self.store, self.eddie, ["FEMUR_LEFT", "FEMUR_RIGHT"])
         compare.assert_called_once()
         self.assertEqual(self.states(), {"FEMUR_LEFT": "pending", "FEMUR_RIGHT": "pending"})

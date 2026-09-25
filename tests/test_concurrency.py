@@ -11,8 +11,8 @@ import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 
-from bonehub_quality_check_server.client import REVIEWER, BoneHubQCClient
-from bonehub_quality_check_server.store import QCError
+from qc_server.client import REVIEWER, BoneHubQCClient
+from qc_server.store import QCError
 
 from tests.support import QCTestCase
 from tests.test_client import LiveServerTestCase

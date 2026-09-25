@@ -15,8 +15,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server.models import EDITOR, REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase, labels_in_mask, write_mask
 from tests.test_api import ApiTestCase

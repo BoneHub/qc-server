@@ -127,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             os.environ[f"{ENV_PREFIX}CREDENTIALS_DIR"] = str(args.credentials_dir)
         if args.reload:
             # The reloader needs an import string rather than a live application object.
-            uvicorn.run("bonehub_quality_check_server.app:app", host=args.host, port=args.port, reload=True)
+            uvicorn.run("qc_server.app:app", host=args.host, port=args.port, reload=True)
         else:
             app = create_app(dataset_root=dataset_root, credentials_dir=args.credentials_dir)
             uvicorn.run(app, host=args.host, port=args.port)

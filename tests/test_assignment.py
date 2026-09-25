@@ -9,8 +9,8 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server.models import EDITOR, REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase
 

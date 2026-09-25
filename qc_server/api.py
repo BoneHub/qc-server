@@ -95,7 +95,7 @@ def ping(request: Request, user: User = Depends(get_user), role: str = Depends(c
     store = get_store(request)
     return {
         "status": "ok",
-        "server": "bonehub-dataset-quality-check-server",
+        "server": "qc-server",
         "server_version": __version__,
         "schema_version": SCHEMA_VERSION,
         "user": user.name,

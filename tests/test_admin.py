@@ -191,7 +191,7 @@ class AdminConfigTests(ApiTestCase):
 
     def test_a_policy_change_is_persisted_for_the_next_start(self):
         self.client.put("/admin/api/config", json={"lease_ttl_seconds": 300}, headers=self.admin_headers)
-        from bonehub_quality_check_server.config import QCServerConfig
+        from qc_server.config import QCServerConfig
 
         self.assertEqual(QCServerConfig.load(self.state_dir / "config.json").lease_ttl_seconds, 300)
 

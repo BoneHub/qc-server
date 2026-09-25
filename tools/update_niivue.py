@@ -6,7 +6,7 @@ NiiVue's npm package ships ``build/index.min.js``, which holds the whole library
 dependencies included -- as one URL-encoded module, ``export const esm = "..."``. This
 script downloads the package from the npm registry, checks it against the registry's
 checksum, decodes that module, checks that it imports nothing, and writes it to
-``bonehub_quality_check_server/static/vendor/niivue-<version>.min.js``.
+``qc_server/static/vendor/niivue-<version>.min.js``.
 
 After an update, point the import at the top of ``static/review.js`` at the new file,
 delete the old one, and run the test suite, which checks the two agree.
@@ -28,7 +28,7 @@ import urllib.request
 from pathlib import Path
 
 REGISTRY = "https://registry.npmjs.org/@niivue/niivue"
-VENDOR_DIR = Path(__file__).resolve().parent.parent / "bonehub_quality_check_server" / "static" / "vendor"
+VENDOR_DIR = Path(__file__).resolve().parent.parent / "qc_server" / "static" / "vendor"
 BUNDLE_MEMBER = "package/build/index.min.js"
 
 

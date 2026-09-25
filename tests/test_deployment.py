@@ -18,8 +18,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from bonehub_quality_check_server.app import create_app
-from bonehub_quality_check_server.config import ENV_PREFIX, QCServerConfig
+from qc_server.app import create_app
+from qc_server.config import ENV_PREFIX, QCServerConfig
 
 from tests.support import QCTestCase, close_logging
 
@@ -186,7 +186,7 @@ class DeploymentFileTests(unittest.TestCase):
 
     def test_the_package_exposes_that_command(self):
         pyproject = (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('bonehub-qc-server = "bonehub_quality_check_server.__main__:main"', pyproject)
+        self.assertIn('bonehub-qc-server = "qc_server.__main__:main"', pyproject)
 
     def test_the_state_folder_is_not_committed(self):
         gitignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")

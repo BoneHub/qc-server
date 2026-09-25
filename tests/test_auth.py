@@ -10,9 +10,9 @@ import json
 import os
 import unittest
 
-from bonehub_quality_check_server import auth
-from bonehub_quality_check_server.models import REVIEWER
-from bonehub_quality_check_server.store import QCError
+from qc_server import auth
+from qc_server.models import REVIEWER
+from qc_server.store import QCError
 
 from tests.support import QCTestCase
 

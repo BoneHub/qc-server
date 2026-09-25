@@ -8,8 +8,8 @@ import os
 import unittest
 from unittest import mock
 
-from bonehub_quality_check_server.__main__ import main
-from bonehub_quality_check_server.config import ENV_PREFIX
+from qc_server.__main__ import main
+from qc_server.config import ENV_PREFIX
 
 from tests.support import QCTestCase
 
@@ -117,7 +117,7 @@ class CommandLineTests(QCTestCase):
         with mock.patch("uvicorn.run") as run:
             with contextlib.redirect_stdout(io.StringIO()):
                 main(["serve", "--dataset-root", str(self.dataset_root), "--reload"])
-        self.assertEqual(run.call_args.args[0], "bonehub_quality_check_server.app:app")
+        self.assertEqual(run.call_args.args[0], "qc_server.app:app")
         self.assertTrue(run.call_args.kwargs["reload"])
 
     def test_an_unknown_command_is_rejected(self):
@@ -130,7 +130,7 @@ class CommandLineTests(QCTestCase):
         # temporary folder so Windows lets it be deleted.
         import logging
 
-        prefix = f"bonehub_quality_check_server.{self.state_root.resolve().as_posix()}"
+        prefix = f"qc_server.{self.state_root.resolve().as_posix()}"
         for name in [n for n in list(logging.Logger.manager.loggerDict) if n.startswith(prefix)]:
             logger = logging.getLogger(name)
             for handler in list(logger.handlers):

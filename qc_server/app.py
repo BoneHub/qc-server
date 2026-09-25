@@ -28,7 +28,7 @@ def create_app(
     """Build the application around one dataset root.
 
     ``dataset_root`` defaults to ``BONEHUB_QC_DATASET_ROOT`` and ``credentials_dir`` to
-    ``BONEHUB_QC_CREDENTIALS_DIR``, so that ``uvicorn bonehub_quality_check_server.app:app``
+    ``BONEHUB_QC_CREDENTIALS_DIR``, so that ``uvicorn qc_server.app:app``
     works inside the container with no arguments of its own.
     """
     dataset_root = Path(dataset_root) if dataset_root else resolve_dataset_root()
@@ -126,7 +126,7 @@ def _announce(store: QCStore) -> None:
     store.audit.event("Server started. " + " | ".join(details))
 
 
-# Module-level `app` so `uvicorn bonehub_quality_check_server.app:app` works. It is built
+# Module-level `app` so `uvicorn qc_server.app:app` works. It is built
 # lazily through __getattr__ so that merely importing this module needs no environment.
 def __getattr__(name: str):
     if name == "app":

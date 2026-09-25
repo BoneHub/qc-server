@@ -17,9 +17,9 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from bonehub_data_schema import __version__ as SCHEMA_VERSION
-from bonehub_quality_check_server import api
-from bonehub_quality_check_server.app import create_app
-from bonehub_quality_check_server.models import EDITOR, REVIEWER
+from qc_server import api
+from qc_server.app import create_app
+from qc_server.models import EDITOR, REVIEWER
 
 from tests.support import LABEL_VALUE, QCTestCase, labels_in_mask, write_mask
 
@@ -57,7 +57,7 @@ class ApiTestCase(QCTestCase):
         self.default_dataset(n_subjects=self.n_subjects)
 
     def build_config(self):
-        from bonehub_quality_check_server.config import QCServerConfig
+        from qc_server.config import QCServerConfig
 
         return QCServerConfig(**self.config_kwargs) if self.config_kwargs else None
 
@@ -252,7 +252,7 @@ class NoSegmentationHandoutTests(ApiTestCase):
         self.builder.add_subject(1, 1, segmentation=None)
 
     def build_config(self):
-        from bonehub_quality_check_server.config import QCServerConfig
+        from qc_server.config import QCServerConfig
 
         return QCServerConfig(include_subjects_without_segmentation=True)
 
