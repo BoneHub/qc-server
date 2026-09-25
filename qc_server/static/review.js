@@ -413,24 +413,20 @@ function topSegmentNumber() {
   return Math.max(0, ...state.segments.map((segment) => segment.number));
 }
 
-// NiiVue's label lookup table: segment number -> colour, and alpha 0 for what is hidden.
+// NiiVue's label lookup table: segment number -> colour, and alpha 0 for what is hidden. It must
+// start at 0, the background: for a label map of 8- or 16-bit numbers, which a .seg.nrrd is,
+// NiiVue's shader takes the table's n-th entry for a voxel of number n, whatever the lowest
+// number in the table. Entries below 0 would shift every label onto its neighbour's colour.
 function labelColormap() {
-  const cm = { R: [], G: [], B: [], A: [], I: [], labels: [] };
-  const add = (number, [red, green, blue], alpha, label = "") => {
+  const cm = { R: [0], G: [0], B: [0], A: [0], I: [0], labels: [""] };
+  for (const segment of state.segments) {
+    const [red, green, blue] = displayColor(segment);
     cm.R.push(red);
     cm.G.push(green);
     cm.B.push(blue);
-    cm.A.push(alpha);
-    cm.I.push(number);
-    cm.labels.push(label);
-  };
-  // NiiVue looks a voxel up at no less than 2/256 of the table's width, which in a table of more
-  // than 64 entries is past the background's own entry: the background took segment 1's colour.
-  // Transparent entries below 0 keep the background's entry clear of that.
-  const width = topSegmentNumber() + 1;
-  for (let number = -Math.ceil(width / 127); number <= 0; number++) add(number, [0, 0, 0], 0);
-  for (const segment of state.segments) {
-    add(segment.number, displayColor(segment), segmentShown(segment) ? 255 : 0, segment.label);
+    cm.A.push(segmentShown(segment) ? 255 : 0);
+    cm.I.push(segment.number);
+    cm.labels.push(segment.label);
   }
   return cm;
 }
