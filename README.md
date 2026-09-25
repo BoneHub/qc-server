@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="qc_server/static/logo.svg" alt="BoneHub Quality Check logo" height="480">
+  <img src="qc_server/static/logo.svg" alt="BoneHub Quality Check logo" height="320">
+</p>
+
+<p align="center">
+  <img src="resources/reviewer-demo.png" alt="Reviewer demo" width="1280">
 </p>
 
 # BoneHub Quality Check — Server
