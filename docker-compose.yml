@@ -44,6 +44,9 @@ services:
     environment:
       BONEHUB_QC_DATASET_ROOT: /data
       BONEHUB_QC_CREDENTIALS_DIR: /var/lib/bonehub-qc
+      # The time zone of server.log and the Dataset_XXX_qualitycheck.log files. A container
+      # does not follow the host's zone, so it is named here; blank is UTC.
+      TZ: "${BONEHUB_QC_TIMEZONE:-UTC}"
       # Leave these blank to have the server generate them on first start and keep them
       # in the credentials volume. The generated admin key is printed once, at that start.
       BONEHUB_QC_ADMIN_KEY: "${BONEHUB_QC_ADMIN_KEY:-}"

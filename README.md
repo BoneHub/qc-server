@@ -584,6 +584,10 @@ server's own folder.
 | `Dataset_XXX_qualitycheck.log`, next to each dataset | a readable record of what was approved into that dataset |
 | `docker compose logs` | the server's console output |
 
+`server.log` and the `_qualitycheck.log` files use the time zone in `BONEHUB_QC_TIMEZONE`
+(`.env`), UTC when it is blank. `submissions.jsonl` always records UTC; the admin panel shows it
+in your browser's time zone.
+
 ### Security
 
 - Every user has their own key. You can restrict a key to some datasets, and replace or

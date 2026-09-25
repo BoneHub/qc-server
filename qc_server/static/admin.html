@@ -716,9 +716,14 @@
         });
       }
 
+      // The server stores UTC; show it in the browser's time zone.
       function shortTime(iso) {
         if (!iso) { return "—"; }
-        return String(iso).replace("T", " ").replace("Z", "");
+        var d = new Date(iso);
+        if (isNaN(d.getTime())) { return String(iso).replace("T", " ").replace("Z", ""); }
+        function pad(n) { return n < 10 ? "0" + n : String(n); }
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " +
+          pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
       }
 
       // --- login ----------------------------------------------------------------

@@ -18,8 +18,9 @@
 FROM python:3.11-slim
 
 # git is needed only to resolve the `bonehub-dataset @ git+https://...` dependency.
+# tzdata stays, for the TZ that docker-compose.yml sets; without it TZ silently means UTC.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends git tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
