@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BoneHub Quality Check &middot; Review</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="/static/logo.svg">
 <style>
   :root {
     color-scheme: light dark;
@@ -22,6 +22,7 @@
     --row-hover: #eef1f5;
     --viewer-bg: #0b0c0e;
     --viewer-text: #c9ced6;
+    --logo-bg: transparent;
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -37,6 +38,8 @@
       --warn: #e0b24d;
       --code-bg: #262a30;
       --row-hover: #262a31;
+      /* the logo is navy on a transparent ground: give it a light tile */
+      --logo-bg: #f6f7f9;
     }
   }
   * { box-sizing: border-box; }
@@ -85,6 +88,7 @@
   .banner.err { color: var(--danger); border-color: var(--danger); }
   .banner.ok { color: var(--ok); border-color: var(--ok); }
   .banner.note { color: var(--warn); border-color: var(--warn); }
+  .logo { display: block; height: 88px; width: auto; padding: 4px; border-radius: 8px; background: var(--logo-bg); }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); white-space: nowrap; }
 
   /* ---------------------------------------------------------------- sign in */
@@ -93,6 +97,7 @@
   #login .row { display: flex; gap: 8px; }
   #login .row input { flex: 1; }
   #login p { margin: 12px 0 0; }
+  #login .logo { height: 160px; margin: 0 auto 16px; }
 
   /* -------------------------------------------------------------- app shell */
   #app { height: 100%; display: flex; flex-direction: column; }
@@ -100,6 +105,7 @@
     display: flex; align-items: center; gap: 12px; padding: 8px 16px;
     border-bottom: 1px solid var(--border); background: var(--panel);
   }
+  .topbar .logo { height: 32px; padding: 2px; border-radius: 6px; }
   .topbar .brand { font-weight: 600; }
   .topbar .spacer { flex: 1; }
   .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 360px; }
@@ -240,6 +246,7 @@
 <!-- ------------------------------------------------------------------ sign in -->
 <main id="login" hidden>
   <div class="card">
+    <img class="logo" src="/static/logo.svg" alt="">
     <h1>BoneHub Quality Check</h1>
     <p class="muted" style="margin-top:0">Sign in with the API key your administrator gave you.</p>
     <div id="loginError" class="banner err" hidden></div>
@@ -259,6 +266,7 @@
 <!-- ---------------------------------------------------------------------- app -->
 <div id="app" hidden>
   <header class="topbar">
+    <img class="logo" src="/static/logo.svg" alt="">
     <span class="brand">BoneHub Quality Check</span>
     <span class="muted">Review</span>
     <span class="spacer"></span>

@@ -42,5 +42,5 @@ include = ["qc_server*"]
 # The admin panel and the review page are served from these files at run time, so they must
 # be installed with the package; tests/test_review_page.py checks nothing under static/ is missed.
 [tool.setuptools.package-data]
-qc_server = ["static/*.html", "static/*.js", "static/*.css", "static/vendor/*"]
+qc_server = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg", "static/vendor/*"]
 

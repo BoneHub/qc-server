@@ -1,955 +1,1273 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BoneHub Quality Check &middot; Admin</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --bg: #f6f7f9;
-    --panel: #ffffff;
-    --border: #dcdfe4;
-    --text: #16191d;
-    --muted: #666d78;
-    --accent: #1e6bb8;
-    --accent-text: #ffffff;
-    --danger: #b3261e;
-    --ok: #1b7f4b;
-    --warn: #8a6100;
-    --code-bg: #f0f2f5;
-  }
-  @media (prefers-color-scheme: dark) {
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>BoneHub Quality Check &middot; Admin</title>
+  <link rel="icon" href="/static/logo.svg">
+  <style>
     :root {
-      --bg: #16181c;
-      --panel: #1e2126;
-      --border: #343941;
-      --text: #e6e8ea;
-      --muted: #99a1ad;
-      --accent: #4c9be8;
-      --accent-text: #0d1117;
-      --danger: #f2837c;
-      --ok: #63cd98;
-      --warn: #e0b24d;
-      --code-bg: #262a30;
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --border: #dcdfe4;
+      --text: #16191d;
+      --muted: #666d78;
+      --accent: #1e6bb8;
+      --accent-text: #ffffff;
+      --danger: #b3261e;
+      --ok: #1b7f4b;
+      --warn: #8a6100;
+      --code-bg: #f0f2f5;
+      --logo-bg: transparent;
     }
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    padding: 24px 16px 64px;
-    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
-  }
-  .wrap { max-width: 1100px; margin: 0 auto; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-  .sub { color: var(--muted); margin: 0 0 24px; }
-  section {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 16px;
-  }
-  button {
-    font: inherit;
-    padding: 6px 12px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--panel);
-    color: var(--text);
-    cursor: pointer;
-  }
-  button:hover { border-color: var(--accent); }
-  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
-  button.danger { color: var(--danger); }
-  button.small { padding: 2px 8px; font-size: 12px; }
-  button:disabled { opacity: .5; cursor: default; }
-  input, select {
-    font: inherit;
-    padding: 6px 8px;
-    border-radius: 6px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    color: var(--text);
-    min-width: 0;
-  }
-  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
-  tbody tr:last-child td { border-bottom: none; }
-  code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
-  .scroll { overflow-x: auto; }
-  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
-  .stat { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
-  .stat .n { font-size: 24px; font-weight: 600; }
-  .stat .k { font-size: 12px; color: var(--muted); }
-  .stat.hot { border-color: var(--accent); }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
-  .row > div { flex: 1 1 160px; }
-  .checks { display: flex; gap: 12px; align-items: center; min-height: 33px; }
-  .stack { display: flex; flex-direction: column; gap: 2px; }
-  .actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
-  label.inline { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 13px; color: var(--text); white-space: nowrap; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border); white-space: nowrap; }
-  .pill.assigned, .pill.review, .pill.edit { color: var(--accent); }
-  .pill.submitted, .pill.applied { color: var(--ok); }
-  .pill.approval { color: var(--ok); border-color: var(--ok); }
-  .pill.escalated { color: var(--warn); border-color: var(--warn); }
-  .pill.expired, .pill.released, .pill.closed { color: var(--muted); }
-  .banner { padding: 10px 12px; border-radius: 6px; margin-bottom: 12px; border: 1px solid var(--border); }
-  .banner.err { color: var(--danger); border-color: var(--danger); }
-  .banner.ok { color: var(--ok); border-color: var(--ok); }
-  .keybox { background: var(--code-bg); border: 1px solid var(--warn); border-radius: 6px; padding: 12px; margin-top: 12px; }
-  .keybox .k { font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; user-select: all; }
-  .muted { color: var(--muted); }
-  .right { text-align: right; }
-  .nowrap { white-space: nowrap; }
-  details summary { cursor: pointer; }
-  details ul { margin: 6px 0 0; padding-left: 18px; }
-  details li { margin: 1px 0; }
-  .lstate-accepted { color: var(--ok); }
-  .lstate-rejected { color: var(--danger); }
-  .lstate-pending { color: var(--accent); }
-  .lstate-removed, .lstate-kept { color: var(--muted); }
-  .quote { color: var(--muted); font-style: italic; }
-  #login { max-width: 420px; margin: 60px auto; }
-  [hidden] { display: none !important; }
-</style>
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #16181c;
+        --panel: #1e2126;
+        --border: #343941;
+        --text: #e6e8ea;
+        --muted: #99a1ad;
+        --accent: #4c9be8;
+        --accent-text: #0d1117;
+        --danger: #f2837c;
+        --ok: #63cd98;
+        --warn: #e0b24d;
+        --code-bg: #262a30;
+        /* the logo is navy on a transparent ground: give it a light tile */
+        --logo-bg: #f6f7f9;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px 16px 64px;
+      font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0 0 4px;
+    }
+
+    h2 {
+      font-size: 15px;
+      margin: 0 0 12px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      color: var(--muted);
+    }
+
+    .sub {
+      color: var(--muted);
+      margin: 0 0 24px;
+    }
+
+    .logo {
+      display: block;
+      height: 88px;
+      width: auto;
+      padding: 4px;
+      border-radius: 8px;
+      background: var(--logo-bg);
+      margin-bottom: 12px;
+    }
+
+    .logo.small {
+      height: 48px;
+      margin: 0;
+      align-self: center;
+    }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    button {
+      font: inherit;
+      padding: 6px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--accent);
+    }
+
+    button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: var(--accent-text);
+    }
+
+    button.danger {
+      color: var(--danger);
+    }
+
+    button.small {
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: default;
+    }
+
+    input,
+    select {
+      font: inherit;
+      padding: 6px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      min-width: 0;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 7px 8px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-weight: 600;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    code,
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .scroll {
+      overflow-x: auto;
+    }
+
+    .grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    }
+
+    .stat {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 12px;
+    }
+
+    .stat .n {
+      font-size: 24px;
+      font-weight: 600;
+    }
+
+    .stat .k {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .stat.hot {
+      border-color: var(--accent);
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+
+    .row>div {
+      flex: 1 1 160px;
+    }
+
+    .checks {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      min-height: 33px;
+    }
+
+    .stack {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .actions {
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    label.inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin: 0;
+      font-size: 13px;
+      color: var(--text);
+      white-space: nowrap;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      border: 1px solid var(--border);
+      white-space: nowrap;
+    }
+
+    .pill.assigned,
+    .pill.review,
+    .pill.edit {
+      color: var(--accent);
+    }
+
+    .pill.submitted,
+    .pill.applied {
+      color: var(--ok);
+    }
+
+    .pill.approval {
+      color: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .pill.escalated {
+      color: var(--warn);
+      border-color: var(--warn);
+    }
+
+    .pill.expired,
+    .pill.released,
+    .pill.closed {
+      color: var(--muted);
+    }
+
+    .banner {
+      padding: 10px 12px;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
+    }
+
+    .banner.err {
+      color: var(--danger);
+      border-color: var(--danger);
+    }
+
+    .banner.ok {
+      color: var(--ok);
+      border-color: var(--ok);
+    }
+
+    .keybox {
+      background: var(--code-bg);
+      border: 1px solid var(--warn);
+      border-radius: 6px;
+      padding: 12px;
+      margin-top: 12px;
+    }
+
+    .keybox .k {
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 13px;
+      word-break: break-all;
+      user-select: all;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .right {
+      text-align: right;
+    }
+
+    .nowrap {
+      white-space: nowrap;
+    }
+
+    details summary {
+      cursor: pointer;
+    }
+
+    details ul {
+      margin: 6px 0 0;
+      padding-left: 18px;
+    }
+
+    details li {
+      margin: 1px 0;
+    }
+
+    .lstate-accepted {
+      color: var(--ok);
+    }
+
+    .lstate-rejected {
+      color: var(--danger);
+    }
+
+    .lstate-pending {
+      color: var(--accent);
+    }
+
+    .lstate-removed,
+    .lstate-kept {
+      color: var(--muted);
+    }
+
+    .quote {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    #login {
+      max-width: 420px;
+      margin: 60px auto;
+    }
+
+    #login .logo {
+      height: 160px;
+      margin: 0 auto 16px;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+  </style>
 </head>
+
 <body>
-<div class="wrap">
+  <div class="wrap">
 
-  <!-- ------------------------------------------------------------ login -->
-  <section id="login">
-    <h1>BoneHub Quality Check</h1>
-    <p class="sub">Enter the server admin key to continue.</p>
-    <div id="loginError" class="banner err" hidden></div>
-    <label for="adminKey">Admin key</label>
-    <div class="row">
-      <div><input id="adminKey" type="password" placeholder="bhqc_..." autocomplete="off" style="width:100%"></div>
-      <button class="primary" id="loginBtn">Sign in</button>
-    </div>
-    <p class="muted" style="margin-bottom:0">
-      A new server prints its key once, at its first start, unless <code>BONEHUB_QC_ADMIN_KEY</code>
-      in <code>.env</code> sets it. The key is kept inside the container; print it again with
-      <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
-    </p>
-    <p class="muted" style="margin-bottom:0">
-      Reviewing subjects? Open the <a href="/review">review page</a> instead. Correcting them? Use the
-      BoneHub Quality Check extension in 3D Slicer.
-    </p>
-  </section>
-
-  <!-- ------------------------------------------------------------- panel -->
-  <div id="panel" hidden>
-    <div class="row" style="margin-bottom:16px">
-      <div>
-        <h1>BoneHub Quality Check</h1>
-        <p class="sub mono" id="datasetRoot" style="margin:0"></p>
-      </div>
-      <button id="refreshBtn">Refresh</button>
-      <button id="reindexBtn">Re-scan dataset</button>
-      <button id="logoutBtn">Sign out</button>
-    </div>
-
-    <div id="globalError" class="banner err" hidden></div>
-    <div id="globalOk" class="banner ok" hidden></div>
-
-    <section>
-      <h2>Queue</h2>
-      <div class="grid" id="stats"></div>
-      <p class="muted" id="indexedAt" style="margin:12px 0 0"></p>
-    </section>
-
-    <section>
-      <h2>Approvals</h2>
-      <p class="muted" style="margin-top:0">
-        Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
-        subject: its accepted labels then become reviewed (status 2) in <code>Subject_info</code>, and an editor's
-        correction replaces the dataset's segmentation, which is backed up first.
-      </p>
-      <div class="row" style="margin-bottom:12px">
-        <div style="flex:0 0 auto">
-          <label for="stageFilter">Showing</label>
-          <select id="stageFilter">
-            <option value="approval">waiting for approval</option>
-            <option value="escalated">sent to you by an editor</option>
-            <option value="review">waiting for a reviewer</option>
-            <option value="edit">waiting for an editor</option>
-            <option value="applied">approved</option>
-            <option value="closed">closed</option>
-            <option value="">all</option>
-          </select>
-        </div>
-        <div></div>
-        <button class="primary" id="approveAllBtn" title="Approve every subject waiting for approval">Approve all waiting</button>
-      </div>
-      <div class="scroll"><table>
-        <thead><tr>
-          <th>Subject</th><th>Stage</th><th>Labels</th><th>Segmentation</th><th>Latest</th><th></th>
-        </tr></thead>
-        <tbody id="casesBody"></tbody>
-      </table></div>
-    </section>
-
-    <section>
-      <h2>Create user</h2>
+    <!-- ------------------------------------------------------------ login -->
+    <section id="login">
+      <img class="logo" src="/static/logo.svg" alt="">
+      <h1>BoneHub Quality Check</h1>
+      <p class="sub">Enter the server admin key to continue.</p>
+      <div id="loginError" class="banner err" hidden></div>
+      <label for="adminKey">Admin key</label>
       <div class="row">
+        <div><input id="adminKey" type="password" placeholder="bhqc_..." autocomplete="off" style="width:100%"></div>
+        <button class="primary" id="loginBtn">Sign in</button>
+      </div>
+      <p class="muted" style="margin-bottom:0">
+        A new server prints its key once, at its first start, unless <code>BONEHUB_QC_ADMIN_KEY</code>
+        in <code>.env</code> sets it. The key is kept inside the container; print it again with
+        <code>docker compose exec bonehub-qc-server bonehub-qc-server show-admin-key</code>.
+      </p>
+      <p class="muted" style="margin-bottom:0">
+        Reviewing subjects? Open the <a href="/review">review page</a> instead. Correcting them? Use the
+        BoneHub Quality Check extension in 3D Slicer.
+      </p>
+    </section>
+
+    <!-- ------------------------------------------------------------- panel -->
+    <div id="panel" hidden>
+      <div class="row" style="margin-bottom:16px">
+        <img class="logo small" src="/static/logo.svg" alt="">
         <div>
-          <label for="newName">Name</label>
-          <input id="newName" placeholder="alice" style="width:100%">
+          <h1>BoneHub Quality Check</h1>
+          <p class="sub mono" id="datasetRoot" style="margin:0"></p>
         </div>
-        <div>
-          <label id="newRolesLabel">Roles</label>
-          <div class="checks" role="group" aria-labelledby="newRolesLabel">
-            <label class="inline" title="Judges each label in the browser, on the review page">
-              <input type="checkbox" id="newReviewer" checked> Reviewer</label>
-            <label class="inline" title="Corrects what reviewers reject, in 3D Slicer">
-              <input type="checkbox" id="newEditor" checked> Editor</label>
+        <button id="refreshBtn">Refresh</button>
+        <button id="reindexBtn">Re-scan dataset</button>
+        <button id="logoutBtn">Sign out</button>
+      </div>
+
+      <div id="globalError" class="banner err" hidden></div>
+      <div id="globalOk" class="banner ok" hidden></div>
+
+      <section>
+        <h2>Queue</h2>
+        <div class="grid" id="stats"></div>
+        <p class="muted" id="indexedAt" style="margin:12px 0 0"></p>
+      </section>
+
+      <section>
+        <h2>Approvals</h2>
+        <p class="muted" style="margin-top:0">
+          Reviewers' and editors' verdicts wait here. Nothing is written into the dataset until you approve a
+          subject: its accepted labels then become reviewed (status 2) in <code>Subject_info</code>, and an editor's
+          correction replaces the dataset's segmentation, which is backed up first.
+        </p>
+        <div class="row" style="margin-bottom:12px">
+          <div style="flex:0 0 auto">
+            <label for="stageFilter">Showing</label>
+            <select id="stageFilter">
+              <option value="approval">waiting for approval</option>
+              <option value="escalated">sent to you by an editor</option>
+              <option value="review">waiting for a reviewer</option>
+              <option value="edit">waiting for an editor</option>
+              <option value="applied">approved</option>
+              <option value="closed">closed</option>
+              <option value="">all</option>
+            </select>
+          </div>
+          <div></div>
+          <button class="primary" id="approveAllBtn" title="Approve every subject waiting for approval">Approve all
+            waiting</button>
+        </div>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th>Stage</th>
+                <th>Labels</th>
+                <th>Segmentation</th>
+                <th>Latest</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="casesBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Create user</h2>
+        <div class="row">
+          <div>
+            <label for="newName">Name</label>
+            <input id="newName" placeholder="alice" style="width:100%">
+          </div>
+          <div>
+            <label id="newRolesLabel">Roles</label>
+            <div class="checks" role="group" aria-labelledby="newRolesLabel">
+              <label class="inline" title="Judges each label in the browser, on the review page">
+                <input type="checkbox" id="newReviewer" checked> Reviewer</label>
+              <label class="inline" title="Corrects what reviewers reject, in 3D Slicer">
+                <input type="checkbox" id="newEditor" checked> Editor</label>
+            </div>
+          </div>
+          <div>
+            <label for="newDatasets">Dataset ids (optional)</label>
+            <input id="newDatasets" placeholder="1,3,10 — blank means all" style="width:100%">
+          </div>
+          <div>
+            <label for="newAccess">Sent to the user</label>
+            <select id="newAccess" style="width:100%"
+              title="What the user is sent of each subject. A file they are not sent is refused to them.">
+              <option value="image_and_segmentation">Image + segmentation</option>
+              <option value="segmentation">Segmentation only</option>
+              <option value="image">Image only</option>
+            </select>
+          </div>
+          <div>
+            <label for="newNote">Note (optional)</label>
+            <input id="newNote" placeholder="radiology resident" style="width:100%">
+          </div>
+          <button class="primary" id="createBtn">Create &amp; issue key</button>
+        </div>
+        <p class="muted" style="margin:8px 0 0">
+          A reviewer accepts or rejects each label of a subject in the browser, on the review page. An editor
+          corrects what reviewers rejected, in 3D Slicer. A user can be both, but never reviews their own
+          correction.
+        </p>
+        <div id="newKeyBox" class="keybox" hidden>
+          <strong>API key for <span id="newKeyName"></span></strong>
+          <div class="k" id="newKeyValue"></div>
+          <div class="row" style="margin-top:8px">
+            <button id="copyKeyBtn">Copy key</button>
+            <button id="copyInviteBtn">Copy invite link</button>
+          </div>
+          <div class="k muted" id="newInviteValue" style="margin-top:8px"></div>
+          <p class="muted" id="newKeyHelp" style="margin:8px 0 0"></p>
+        </div>
+      </section>
+
+      <section>
+        <h2>Users</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Key</th>
+                <th>Status</th>
+                <th>Roles</th>
+                <th class="right">Open</th>
+                <th class="right">Reviewed</th>
+                <th class="right">Edited</th>
+                <th>Sent</th>
+                <th>Datasets</th>
+                <th>Note</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="usersBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section>
+        <h2>Assignments</h2>
+        <div class="row" style="margin-bottom:12px">
+          <div style="flex:0 0 auto">
+            <label for="stateFilter">State</label>
+            <select id="stateFilter">
+              <option value="">all</option>
+              <option value="assigned">assigned</option>
+              <option value="submitted">submitted</option>
+              <option value="released">released</option>
+              <option value="expired">expired</option>
+            </select>
           </div>
         </div>
-        <div>
-          <label for="newDatasets">Dataset ids (optional)</label>
-          <input id="newDatasets" placeholder="1,3,10 — blank means all" style="width:100%">
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Subject</th>
+                <th>User</th>
+                <th>Role</th>
+                <th>State</th>
+                <th>Assigned</th>
+                <th>Submitted</th>
+                <th>Verdict</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="assignBody"></tbody>
+          </table>
         </div>
-        <div>
-          <label for="newAccess">Sent to the user</label>
-          <select id="newAccess" style="width:100%"
-                  title="What the user is sent of each subject. A file they are not sent is refused to them.">
-            <option value="image_and_segmentation">Image + segmentation</option>
-            <option value="segmentation">Segmentation only</option>
-            <option value="image">Image only</option>
-          </select>
-        </div>
-        <div>
-          <label for="newNote">Note (optional)</label>
-          <input id="newNote" placeholder="radiology resident" style="width:100%">
-        </div>
-        <button class="primary" id="createBtn">Create &amp; issue key</button>
-      </div>
-      <p class="muted" style="margin:8px 0 0">
-        A reviewer accepts or rejects each label of a subject in the browser, on the review page. An editor
-        corrects what reviewers rejected, in 3D Slicer. A user can be both, but never reviews their own
-        correction.
-      </p>
-      <div id="newKeyBox" class="keybox" hidden>
-        <strong>API key for <span id="newKeyName"></span></strong>
-        <div class="k" id="newKeyValue"></div>
-        <div class="row" style="margin-top:8px">
-          <button id="copyKeyBtn">Copy key</button>
-          <button id="copyInviteBtn">Copy invite link</button>
-        </div>
-        <div class="k muted" id="newInviteValue" style="margin-top:8px"></div>
-        <p class="muted" id="newKeyHelp" style="margin:8px 0 0"></p>
-      </div>
-    </section>
+      </section>
 
-    <section>
-      <h2>Users</h2>
-      <div class="scroll"><table>
-        <thead><tr>
-          <th>Name</th><th>Key</th><th>Status</th><th>Roles</th><th class="right">Open</th>
-          <th class="right">Reviewed</th><th class="right">Edited</th><th>Sent</th><th>Datasets</th><th>Note</th><th></th>
-        </tr></thead>
-        <tbody id="usersBody"></tbody>
-      </table></div>
-    </section>
+      <section>
+        <h2>Recent activity</h2>
+        <div class="scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Kind</th>
+                <th>Subject</th>
+                <th>User</th>
+                <th>Detail</th>
+              </tr>
+            </thead>
+            <tbody id="logBody"></tbody>
+          </table>
+        </div>
+      </section>
 
-    <section>
-      <h2>Assignments</h2>
-      <div class="row" style="margin-bottom:12px">
-        <div style="flex:0 0 auto">
-          <label for="stateFilter">State</label>
-          <select id="stateFilter">
-            <option value="">all</option>
-            <option value="assigned">assigned</option>
-            <option value="submitted">submitted</option>
-            <option value="released">released</option>
-            <option value="expired">expired</option>
-          </select>
+      <section>
+        <h2>Policy</h2>
+        <div class="row">
+          <div>
+            <label for="cfgEligible">Eligible label statuses</label>
+            <input id="cfgEligible" placeholder="1" title="1 = not reviewed, 2 = reviewed (comma-separated)"
+              style="width:100%">
+          </div>
+          <div>
+            <label for="cfgLease">Lease TTL (seconds)</label>
+            <input id="cfgLease" type="number" min="60" style="width:100%">
+          </div>
+          <div>
+            <label for="cfgMax">Max subjects per user and role</label>
+            <input id="cfgMax" type="number" min="1" style="width:100%">
+          </div>
+          <div>
+            <label for="cfgStrategy">Assignment strategy</label>
+            <select id="cfgStrategy" style="width:100%">
+              <option value="sequential">sequential</option>
+              <option value="random">random</option>
+            </select>
+          </div>
         </div>
-      </div>
-      <div class="scroll"><table>
-        <thead><tr>
-          <th>Subject</th><th>User</th><th>Role</th><th>State</th><th>Assigned</th>
-          <th>Submitted</th><th>Verdict</th><th></th>
-        </tr></thead>
-        <tbody id="assignBody"></tbody>
-      </table></div>
-    </section>
-
-    <section>
-      <h2>Recent activity</h2>
-      <div class="scroll"><table>
-        <thead><tr><th>Time</th><th>Kind</th><th>Subject</th><th>User</th><th>Detail</th></tr></thead>
-        <tbody id="logBody"></tbody>
-      </table></div>
-    </section>
-
-    <section>
-      <h2>Policy</h2>
-      <div class="row">
-        <div>
-          <label for="cfgEligible">Eligible label statuses</label>
-          <input id="cfgEligible" placeholder="1" title="1 = not reviewed, 2 = reviewed (comma-separated)" style="width:100%">
+        <div class="row" style="margin-top:12px">
+          <div><label title="Off: the corrected labels an editor vouches for are accepted as they are">
+              <input type="checkbox" id="cfgEditsReview"> Editors' corrections go back to a reviewer</label></div>
+          <div><label><input type="checkbox" id="cfgNoSeg"> Queue subjects without segmentation</label></div>
+          <div><label title="On approval, a label no longer in the segmentation becomes 0, not available">
+              <input type="checkbox" id="cfgRemoved"> Mark removed labels not available</label></div>
+          <div><label><input type="checkbox" id="cfgGeometry"> Require geometry match</label></div>
+          <div><label><input type="checkbox" id="cfgBackups"> Keep segmentation backups</label></div>
+          <button class="primary" id="saveCfgBtn">Save policy</button>
         </div>
-        <div>
-          <label for="cfgLease">Lease TTL (seconds)</label>
-          <input id="cfgLease" type="number" min="60" style="width:100%">
-        </div>
-        <div>
-          <label for="cfgMax">Max subjects per user and role</label>
-          <input id="cfgMax" type="number" min="1" style="width:100%">
-        </div>
-        <div>
-          <label for="cfgStrategy">Assignment strategy</label>
-          <select id="cfgStrategy" style="width:100%">
-            <option value="sequential">sequential</option>
-            <option value="random">random</option>
-          </select>
-        </div>
-      </div>
-      <div class="row" style="margin-top:12px">
-        <div><label title="Off: the corrected labels an editor vouches for are accepted as they are">
-          <input type="checkbox" id="cfgEditsReview"> Editors' corrections go back to a reviewer</label></div>
-        <div><label><input type="checkbox" id="cfgNoSeg"> Queue subjects without segmentation</label></div>
-        <div><label title="On approval, a label no longer in the segmentation becomes 0, not available">
-          <input type="checkbox" id="cfgRemoved"> Mark removed labels not available</label></div>
-        <div><label><input type="checkbox" id="cfgGeometry"> Require geometry match</label></div>
-        <div><label><input type="checkbox" id="cfgBackups"> Keep segmentation backups</label></div>
-        <button class="primary" id="saveCfgBtn">Save policy</button>
-      </div>
-      <div id="cfgMsg" class="banner ok" hidden style="margin:12px 0 0"></div>
-    </section>
+        <div id="cfgMsg" class="banner ok" hidden style="margin:12px 0 0"></div>
+      </section>
+    </div>
   </div>
-</div>
 
-<script>
-(function () {
-  "use strict";
+  <script>
+    (function () {
+      "use strict";
 
-  var KEY_STORAGE = "bonehub_qc_admin_key";
-  var adminKey = null;
-  var config = {};
-  var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
+      var KEY_STORAGE = "bonehub_qc_admin_key";
+      var adminKey = null;
+      var config = {};
+      var usersByName = {};  // as last listed, for the roles of a user whose key is rotated
 
-  // What a user may do (User.roles on the server), and where each role works.
-  var ROLE_OPTIONS = [
-    ["reviewer", "Reviewer", "Judges each label in the browser, on the review page"],
-    ["editor", "Editor", "Corrects what reviewers reject, in 3D Slicer"]
-  ];
+      // What a user may do (User.roles on the server), and where each role works.
+      var ROLE_OPTIONS = [
+        ["reviewer", "Reviewer", "Judges each label in the browser, on the review page"],
+        ["editor", "Editor", "Corrects what reviewers reject, in 3D Slicer"]
+      ];
 
-  // What a user is sent of each subject (User.data_access on the server).
-  var ACCESS_OPTIONS = [
-    ["image_and_segmentation", "Image + segmentation"],
-    ["segmentation", "Segmentation only"],
-    ["image", "Image only"]
-  ];
+      // What a user is sent of each subject (User.data_access on the server).
+      var ACCESS_OPTIONS = [
+        ["image_and_segmentation", "Image + segmentation"],
+        ["segmentation", "Segmentation only"],
+        ["image", "Image only"]
+      ];
 
-  // Where a subject stands (Case.stage), in words.
-  var STAGE_TEXT = {
-    review: "to review",
-    edit: "to edit",
-    approval: "awaiting approval",
-    escalated: "escalated",
-    applied: "approved",
-    closed: "closed"
-  };
+      // Where a subject stands (Case.stage), in words.
+      var STAGE_TEXT = {
+        review: "to review",
+        edit: "to edit",
+        approval: "awaiting approval",
+        escalated: "escalated",
+        applied: "approved",
+        closed: "closed"
+      };
 
-  var REASON_TEXT = { quality: "needs correction", absent: "should not be there", missing: "is missing" };
+      var REASON_TEXT = { quality: "needs correction", absent: "should not be there", missing: "is missing" };
 
-  var $ = function (id) { return document.getElementById(id); };
+      var $ = function (id) { return document.getElementById(id); };
 
-  // --- transport ------------------------------------------------------------
-  function api(method, path, body) {
-    var opts = { method: method, headers: { "X-Admin-Key": adminKey, "Accept": "application/json" } };
-    if (body !== undefined) {
-      opts.headers["Content-Type"] = "application/json";
-      opts.body = JSON.stringify(body);
-    }
-    return fetch(path, opts).then(function (response) {
-      return response.text().then(function (text) {
-        var data = null;
-        try { data = text ? JSON.parse(text) : null; } catch (e) { data = { detail: text }; }
-        if (!response.ok) {
-          var detail = data && data.detail ? data.detail : ("HTTP " + response.status);
-          var err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
-          err.status = response.status;
-          throw err;
+      // --- transport ------------------------------------------------------------
+      function api(method, path, body) {
+        var opts = { method: method, headers: { "X-Admin-Key": adminKey, "Accept": "application/json" } };
+        if (body !== undefined) {
+          opts.headers["Content-Type"] = "application/json";
+          opts.body = JSON.stringify(body);
         }
-        return data;
+        return fetch(path, opts).then(function (response) {
+          return response.text().then(function (text) {
+            var data = null;
+            try { data = text ? JSON.parse(text) : null; } catch (e) { data = { detail: text }; }
+            if (!response.ok) {
+              var detail = data && data.detail ? data.detail : ("HTTP " + response.status);
+              var err = new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+              err.status = response.status;
+              throw err;
+            }
+            return data;
+          });
+        });
+      }
+
+      function flash(id, message) {
+        var box = $(id);
+        box.textContent = message;
+        box.hidden = false;
+        window.setTimeout(function () { box.hidden = true; }, 8000);
+      }
+
+      function showError(message) { flash("globalError", message); }
+      function showOk(message) { flash("globalOk", message); }
+
+      function esc(value) {
+        if (value === null || value === undefined) { return ""; }
+        return String(value).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function shortTime(iso) {
+        if (!iso) { return "—"; }
+        return String(iso).replace("T", " ").replace("Z", "");
+      }
+
+      // --- login ----------------------------------------------------------------
+      function signIn(key) {
+        adminKey = key;
+        return api("GET", "/admin/api/session").then(function (session) {
+          try { window.sessionStorage.setItem(KEY_STORAGE, key); } catch (e) { /* private mode */ }
+          $("login").hidden = true;
+          $("panel").hidden = false;
+          $("datasetRoot").textContent = session.dataset_root + "  ·  server " + session.server_id +
+            ((session.sessions || []).length > 1 ? "  (" + session.sessions.length + " servers use this dataset)" : "");
+          fillConfig(session.config);
+          return refreshAll();
+        });
+      }
+
+      $("loginBtn").addEventListener("click", function () {
+        var key = $("adminKey").value.trim();
+        if (!key) { return; }
+        $("loginError").hidden = true;
+        signIn(key)["catch"](function (err) {
+          adminKey = null;
+          $("loginError").textContent = err.message;
+          $("loginError").hidden = false;
+        });
       });
-    });
-  }
 
-  function flash(id, message) {
-    var box = $(id);
-    box.textContent = message;
-    box.hidden = false;
-    window.setTimeout(function () { box.hidden = true; }, 8000);
-  }
+      $("adminKey").addEventListener("keydown", function (event) {
+        if (event.key === "Enter") { $("loginBtn").click(); }
+      });
 
-  function showError(message) { flash("globalError", message); }
-  function showOk(message) { flash("globalOk", message); }
+      $("logoutBtn").addEventListener("click", function () {
+        try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
+        window.location.reload();
+      });
 
-  function esc(value) {
-    if (value === null || value === undefined) { return ""; }
-    return String(value).replace(/[&<>"']/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
-    });
-  }
+      // --- rendering ------------------------------------------------------------
+      function renderStats(stats) {
+        var cells = [
+          ["Awaiting approval", stats.awaiting_approval, stats.awaiting_approval > 0],
+          ["Escalated", stats.escalated, stats.escalated > 0],
+          ["To review", stats.to_review],
+          ["To edit", stats.to_edit],
+          ["Out now", stats.assigned],
+          ["Not started", stats.available],
+          ["Approved", stats.applied],
+          ["Closed", stats.closed],
+          ["On other servers", stats.assigned_by_other_servers],
+          ["Eligible", stats.eligible_subjects],
+          ["Subjects total", stats.total_subjects]
+        ];
+        $("stats").innerHTML = cells.map(function (c) {
+          return '<div class="stat' + (c[2] ? " hot" : "") + '"><div class="n">' + esc(c[1]) + '</div><div class="k">' +
+            esc(c[0]) + "</div></div>";
+        }).join("");
 
-  function shortTime(iso) {
-    if (!iso) { return "—"; }
-    return String(iso).replace("T", " ").replace("Z", "");
-  }
+        var perDataset = Object.keys(stats.datasets || {}).map(function (id) {
+          return "Dataset " + id + ": " + stats.datasets[id];
+        }).join(" · ");
+        $("indexedAt").textContent =
+          "Indexed " + shortTime(stats.index_built_at) + (perDataset ? " — " + perDataset : "");
+      }
 
-  // --- login ----------------------------------------------------------------
-  function signIn(key) {
-    adminKey = key;
-    return api("GET", "/admin/api/session").then(function (session) {
-      try { window.sessionStorage.setItem(KEY_STORAGE, key); } catch (e) { /* private mode */ }
-      $("login").hidden = true;
-      $("panel").hidden = false;
-      $("datasetRoot").textContent = session.dataset_root + "  ·  server " + session.server_id +
-        ((session.sessions || []).length > 1 ? "  (" + session.sessions.length + " servers use this dataset)" : "");
-      fillConfig(session.config);
-      return refreshAll();
-    });
-  }
+      // One label of a case, in words: what it is and who stands behind it.
+      function labelText(label) {
+        var edited = label.edited_by ? ", corrected by " + label.edited_by : "";
+        switch (label.state) {
+          case "accepted": return "accepted by " + label.by + edited;
+          case "pending":
+            if (!label.painted) { return "removed by " + label.edited_by + ", waits for a reviewer to agree"; }
+            return (label.edited_by ? "corrected by " + label.edited_by + ", " : "") + "waits for a reviewer";
+          case "rejected":
+            return label.painted ? "rejected by " + label.by + ": " + (REASON_TEXT[label.reason] || label.reason)
+              : "reported missing by " + label.by;
+          case "removed": return label.by ? "removed by " + label.by : "not in the segmentation";
+          case "kept": return "reviewed in the dataset already, not under review";
+          default: return label.state;
+        }
+      }
 
-  $("loginBtn").addEventListener("click", function () {
-    var key = $("adminKey").value.trim();
-    if (!key) { return; }
-    $("loginError").hidden = true;
-    signIn(key)["catch"](function (err) {
-      adminKey = null;
-      $("loginError").textContent = err.message;
-      $("loginError").hidden = false;
-    });
-  });
+      function labelsCell(c) {
+        var names = Object.keys(c.labels || {}).sort();
+        var counts = {};
+        names.forEach(function (name) { var s = c.labels[name].state; counts[s] = (counts[s] || 0) + 1; });
+        var summary = ["accepted", "pending", "rejected", "removed", "kept"].filter(function (s) { return counts[s]; })
+          .map(function (s) { return counts[s] + " " + (s === "pending" ? "to review" : s); }).join(" · ");
+        var items = names.map(function (name) {
+          var label = c.labels[name];
+          return '<li><span class="mono">' + esc(name) + '</span> <span class="lstate-' + esc(label.state) + '">' +
+            esc(labelText(label)) + "</span></li>";
+        });
+        (c.requests || []).forEach(function (request) {
+          items.push("<li>" + esc(request.by) + " asks an editor: " + '<span class="quote">' + esc(request.comment || "(no comment)") +
+            "</span></li>");
+        });
+        var approval = "";
+        if (c.stage === "approval") {
+          var reviewed = names.filter(function (n) { return c.labels[n].state === "accepted"; });
+          var gone = names.filter(function (n) { return !c.labels[n].painted; });
+          approval = '<div class="muted" style="margin-top:4px">On approval: ' +
+            (reviewed.length ? esc(reviewed.length) + " set to 2" : "no label set to 2") +
+            (gone.length && config.mark_removed_labels_absent ? "; " + esc(gone.join(", ")) + " set to 0" : "") + "</div>";
+        }
+        return "<details><summary>" + esc(summary || "no labels") + "</summary><ul>" + items.join("") + "</ul></details>" + approval;
+      }
 
-  $("adminKey").addEventListener("keydown", function (event) {
-    if (event.key === "Enter") { $("loginBtn").click(); }
-  });
+      function lastEventCell(c) {
+        var events = c.events || [];
+        if (!events.length) { return '<span class="muted">—</span>'; }
+        var e = events[events.length - 1];
+        var what = {
+          review: "reviewed", edit: "corrected", escalate: "sent it to you", approve: "approved",
+          "return": "sent it back", close: "closed"
+        }[e.action] || e.action;
+        return '<div class="nowrap muted">' + esc(shortTime(e.at)) + "</div><div>" + esc(e.by) + " " + esc(what) + "</div>" +
+          (e.comment ? '<div class="quote">“' + esc(e.comment) + "”</div>" : "");
+      }
 
-  $("logoutBtn").addEventListener("click", function () {
-    try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
-    window.location.reload();
-  });
+      function caseActions(c) {
+        if (c.stage === "applied") { return ""; }
+        if (c.leased_to) { return '<span class="muted nowrap">with ' + esc(c.leased_to) + "</span>"; }
+        var key = esc(c.subject_key);
+        var buttons = [];
+        if (c.stage === "approval") {
+          buttons.push('<button class="small primary" data-act="approve" data-key="' + key + '">Approve</button>');
+        }
+        buttons.push('<button class="small" data-act="to-review" data-key="' + key + '" title="Every verdict is reviewed again">To reviewers</button>');
+        buttons.push('<button class="small" data-act="to-edit" data-key="' + key + '" title="An editor corrects it, with your comment">To editors</button>');
+        if (c.stage !== "closed") {
+          buttons.push('<button class="small danger" data-act="close" data-key="' + key + '" title="Finish it without writing anything">Close</button>');
+        }
+        return '<div class="actions">' + buttons.join("") + "</div>";
+      }
 
-  // --- rendering ------------------------------------------------------------
-  function renderStats(stats) {
-    var cells = [
-      ["Awaiting approval", stats.awaiting_approval, stats.awaiting_approval > 0],
-      ["Escalated", stats.escalated, stats.escalated > 0],
-      ["To review", stats.to_review],
-      ["To edit", stats.to_edit],
-      ["Out now", stats.assigned],
-      ["Not started", stats.available],
-      ["Approved", stats.applied],
-      ["Closed", stats.closed],
-      ["On other servers", stats.assigned_by_other_servers],
-      ["Eligible", stats.eligible_subjects],
-      ["Subjects total", stats.total_subjects]
-    ];
-    $("stats").innerHTML = cells.map(function (c) {
-      return '<div class="stat' + (c[2] ? " hot" : "") + '"><div class="n">' + esc(c[1]) + '</div><div class="k">' +
-        esc(c[0]) + "</div></div>";
-    }).join("");
+      function renderCases(cases) {
+        var stage = $("stageFilter").value;
+        if (!cases.length) {
+          $("casesBody").innerHTML = '<tr><td colspan="6" class="muted">' +
+            (stage === "approval" ? "Nothing waits for your approval." : "Nothing here.") + "</td></tr>";
+          return;
+        }
+        $("casesBody").innerHTML = cases.map(function (c) {
+          var approval = (c.events || []).filter(function (e) { return e.action === "approve"; }).pop();
+          var segmentation = c.staged ? "correction by " + esc(c.edited_by)
+            : approval && approval.details.segmentation_written ? "correction by " + esc(c.edited_by) + ", written into the dataset"
+              : c.base ? "the dataset's own" : "none";
+          var download = (c.staged || c.base) && c.stage !== "applied"
+            ? ' <button class="small" data-act="download" data-key="' + esc(c.subject_key) + '" title="Download it, to look at in 3D Slicer">Download</button>'
+            : "";
+          return "<tr>" +
+            '<td class="mono nowrap">' + esc(c.subject_key) + "</td>" +
+            '<td><span class="pill ' + esc(c.stage) + '">' + esc(STAGE_TEXT[c.stage] || c.stage) + "</span></td>" +
+            "<td>" + labelsCell(c) + "</td>" +
+            "<td>" + segmentation + download + "</td>" +
+            "<td>" + lastEventCell(c) + "</td>" +
+            '<td class="right">' + caseActions(c) + "</td></tr>";
+        }).join("");
+      }
 
-    var perDataset = Object.keys(stats.datasets || {}).map(function (id) {
-      return "Dataset " + id + ": " + stats.datasets[id];
-    }).join(" · ");
-    $("indexedAt").textContent =
-      "Indexed " + shortTime(stats.index_built_at) + (perDataset ? " — " + perDataset : "");
-  }
+      function accessSelect(user) {
+        return '<select data-act="access" data-name="' + esc(user.name) + '" aria-label="What ' + esc(user.name) +
+          ' is sent">' + ACCESS_OPTIONS.map(function (option) {
+            return '<option value="' + option[0] + '"' + (user.data_access === option[0] ? " selected" : "") + ">" +
+              esc(option[1]) + "</option>";
+          }).join("") + "</select>";
+      }
 
-  // One label of a case, in words: what it is and who stands behind it.
-  function labelText(label) {
-    var edited = label.edited_by ? ", corrected by " + label.edited_by : "";
-    switch (label.state) {
-      case "accepted": return "accepted by " + label.by + edited;
-      case "pending":
-        if (!label.painted) { return "removed by " + label.edited_by + ", waits for a reviewer to agree"; }
-        return (label.edited_by ? "corrected by " + label.edited_by + ", " : "") + "waits for a reviewer";
-      case "rejected":
-        return label.painted ? "rejected by " + label.by + ": " + (REASON_TEXT[label.reason] || label.reason)
-          : "reported missing by " + label.by;
-      case "removed": return label.by ? "removed by " + label.by : "not in the segmentation";
-      case "kept": return "reviewed in the dataset already, not under review";
-      default: return label.state;
-    }
-  }
+      // One above the other, so that the table still fits the panel's width.
+      function roleBoxes(user) {
+        return '<div class="stack">' + ROLE_OPTIONS.map(function (option) {
+          var held = (user.roles || []).indexOf(option[0]) !== -1;
+          return '<label class="inline" title="' + esc(option[2]) + '"><input type="checkbox" data-act="role" data-name="' +
+            esc(user.name) + '" data-role="' + option[0] + '"' + (held ? " checked" : "") + "> " + esc(option[1]) +
+            "</label>";
+        }).join("") + "</div>";
+      }
 
-  function labelsCell(c) {
-    var names = Object.keys(c.labels || {}).sort();
-    var counts = {};
-    names.forEach(function (name) { var s = c.labels[name].state; counts[s] = (counts[s] || 0) + 1; });
-    var summary = ["accepted", "pending", "rejected", "removed", "kept"].filter(function (s) { return counts[s]; })
-      .map(function (s) { return counts[s] + " " + (s === "pending" ? "to review" : s); }).join(" · ");
-    var items = names.map(function (name) {
-      var label = c.labels[name];
-      return '<li><span class="mono">' + esc(name) + '</span> <span class="lstate-' + esc(label.state) + '">' +
-        esc(labelText(label)) + "</span></li>";
-    });
-    (c.requests || []).forEach(function (request) {
-      items.push("<li>" + esc(request.by) + " asks an editor: " + '<span class="quote">' + esc(request.comment || "(no comment)") +
-        "</span></li>");
-    });
-    var approval = "";
-    if (c.stage === "approval") {
-      var reviewed = names.filter(function (n) { return c.labels[n].state === "accepted"; });
-      var gone = names.filter(function (n) { return !c.labels[n].painted; });
-      approval = '<div class="muted" style="margin-top:4px">On approval: ' +
-        (reviewed.length ? esc(reviewed.length) + " set to 2" : "no label set to 2") +
-        (gone.length && config.mark_removed_labels_absent ? "; " + esc(gone.join(", ")) + " set to 0" : "") + "</div>";
-    }
-    return "<details><summary>" + esc(summary || "no labels") + "</summary><ul>" + items.join("") + "</ul></details>" + approval;
-  }
-
-  function lastEventCell(c) {
-    var events = c.events || [];
-    if (!events.length) { return '<span class="muted">—</span>'; }
-    var e = events[events.length - 1];
-    var what = { review: "reviewed", edit: "corrected", escalate: "sent it to you", approve: "approved",
-      "return": "sent it back", close: "closed" }[e.action] || e.action;
-    return '<div class="nowrap muted">' + esc(shortTime(e.at)) + "</div><div>" + esc(e.by) + " " + esc(what) + "</div>" +
-      (e.comment ? '<div class="quote">“' + esc(e.comment) + "”</div>" : "");
-  }
-
-  function caseActions(c) {
-    if (c.stage === "applied") { return ""; }
-    if (c.leased_to) { return '<span class="muted nowrap">with ' + esc(c.leased_to) + "</span>"; }
-    var key = esc(c.subject_key);
-    var buttons = [];
-    if (c.stage === "approval") {
-      buttons.push('<button class="small primary" data-act="approve" data-key="' + key + '">Approve</button>');
-    }
-    buttons.push('<button class="small" data-act="to-review" data-key="' + key + '" title="Every verdict is reviewed again">To reviewers</button>');
-    buttons.push('<button class="small" data-act="to-edit" data-key="' + key + '" title="An editor corrects it, with your comment">To editors</button>');
-    if (c.stage !== "closed") {
-      buttons.push('<button class="small danger" data-act="close" data-key="' + key + '" title="Finish it without writing anything">Close</button>');
-    }
-    return '<div class="actions">' + buttons.join("") + "</div>";
-  }
-
-  function renderCases(cases) {
-    var stage = $("stageFilter").value;
-    if (!cases.length) {
-      $("casesBody").innerHTML = '<tr><td colspan="6" class="muted">' +
-        (stage === "approval" ? "Nothing waits for your approval." : "Nothing here.") + "</td></tr>";
-      return;
-    }
-    $("casesBody").innerHTML = cases.map(function (c) {
-      var approval = (c.events || []).filter(function (e) { return e.action === "approve"; }).pop();
-      var segmentation = c.staged ? "correction by " + esc(c.edited_by)
-        : approval && approval.details.segmentation_written ? "correction by " + esc(c.edited_by) + ", written into the dataset"
-        : c.base ? "the dataset's own" : "none";
-      var download = (c.staged || c.base) && c.stage !== "applied"
-        ? ' <button class="small" data-act="download" data-key="' + esc(c.subject_key) + '" title="Download it, to look at in 3D Slicer">Download</button>'
-        : "";
-      return "<tr>" +
-        '<td class="mono nowrap">' + esc(c.subject_key) + "</td>" +
-        '<td><span class="pill ' + esc(c.stage) + '">' + esc(STAGE_TEXT[c.stage] || c.stage) + "</span></td>" +
-        "<td>" + labelsCell(c) + "</td>" +
-        "<td>" + segmentation + download + "</td>" +
-        "<td>" + lastEventCell(c) + "</td>" +
-        '<td class="right">' + caseActions(c) + "</td></tr>";
-    }).join("");
-  }
-
-  function accessSelect(user) {
-    return '<select data-act="access" data-name="' + esc(user.name) + '" aria-label="What ' + esc(user.name) +
-      ' is sent">' + ACCESS_OPTIONS.map(function (option) {
-        return '<option value="' + option[0] + '"' + (user.data_access === option[0] ? " selected" : "") + ">" +
-          esc(option[1]) + "</option>";
-      }).join("") + "</select>";
-  }
-
-  // One above the other, so that the table still fits the panel's width.
-  function roleBoxes(user) {
-    return '<div class="stack">' + ROLE_OPTIONS.map(function (option) {
-      var held = (user.roles || []).indexOf(option[0]) !== -1;
-      return '<label class="inline" title="' + esc(option[2]) + '"><input type="checkbox" data-act="role" data-name="' +
-        esc(user.name) + '" data-role="' + option[0] + '"' + (held ? " checked" : "") + "> " + esc(option[1]) +
-        "</label>";
-    }).join("") + "</div>";
-  }
-
-  function renderUsers(users) {
-    usersByName = {};
-    users.forEach(function (u) { usersByName[u.name] = u; });
-    if (!users.length) {
-      $("usersBody").innerHTML = '<tr><td colspan="11" class="muted">No users yet.</td></tr>';
-      return;
-    }
-    $("usersBody").innerHTML = users.map(function (u) {
-      var datasets = u.allowed_dataset_ids === null ? "all" : u.allowed_dataset_ids.join(", ");
-      return "<tr>" +
-        "<td>" + esc(u.name) + "</td>" +
-        '<td class="mono">' + esc(u.key_prefix) + "…</td>" +
-        '<td><span class="pill ' + (u.active ? "submitted" : "expired") + '">' +
-          (u.active ? "active" : "disabled") + "</span></td>" +
-        '<td class="nowrap">' + roleBoxes(u) + "</td>" +
-        '<td class="right">' + esc(u.open) + "</td>" +
-        '<td class="right">' + esc(u.reviewed) + "</td>" +
-        '<td class="right">' + esc(u.edited) + "</td>" +
-        "<td>" + accessSelect(u) + "</td>" +
-        "<td>" + esc(datasets) + "</td>" +
-        '<td class="muted">' + esc(u.note) + "</td>" +
-        '<td class="nowrap right">' +
-          '<button data-act="rotate" data-name="' + esc(u.name) + '">New key</button> ' +
-          '<button data-act="toggle" data-name="' + esc(u.name) + '" data-active="' + (!u.active) + '">' +
+      function renderUsers(users) {
+        usersByName = {};
+        users.forEach(function (u) { usersByName[u.name] = u; });
+        if (!users.length) {
+          $("usersBody").innerHTML = '<tr><td colspan="11" class="muted">No users yet.</td></tr>';
+          return;
+        }
+        $("usersBody").innerHTML = users.map(function (u) {
+          var datasets = u.allowed_dataset_ids === null ? "all" : u.allowed_dataset_ids.join(", ");
+          return "<tr>" +
+            "<td>" + esc(u.name) + "</td>" +
+            '<td class="mono">' + esc(u.key_prefix) + "…</td>" +
+            '<td><span class="pill ' + (u.active ? "submitted" : "expired") + '">' +
+            (u.active ? "active" : "disabled") + "</span></td>" +
+            '<td class="nowrap">' + roleBoxes(u) + "</td>" +
+            '<td class="right">' + esc(u.open) + "</td>" +
+            '<td class="right">' + esc(u.reviewed) + "</td>" +
+            '<td class="right">' + esc(u.edited) + "</td>" +
+            "<td>" + accessSelect(u) + "</td>" +
+            "<td>" + esc(datasets) + "</td>" +
+            '<td class="muted">' + esc(u.note) + "</td>" +
+            '<td class="nowrap right">' +
+            '<button data-act="rotate" data-name="' + esc(u.name) + '">New key</button> ' +
+            '<button data-act="toggle" data-name="' + esc(u.name) + '" data-active="' + (!u.active) + '">' +
             (u.active ? "Disable" : "Enable") + "</button> " +
-          '<button class="danger" data-act="delete" data-name="' + esc(u.name) + '">Delete</button>' +
-        "</td></tr>";
-    }).join("");
-  }
-
-  // What a verdict did, in a few words.
-  function verdictText(a) {
-    if (a.state !== "submitted") { return ""; }
-    if (a.role === "editor") {
-      if (!a.quality_check_confirmed) { return "sent to you"; }
-      var edited = (a.edited_labels || []).length;
-      var removed = (a.removed_labels || []).length;
-      return "corrected " + edited + (removed ? ", removed " + removed : "");
-    }
-    var accepted = (a.accepted_labels || []).length;
-    var missing = (a.missing_labels || []).length;
-    var rejected = Object.keys(a.rejected_labels || {}).length - missing;
-    return (a.quality_check_confirmed ? "" : "rejected the subject: ") + "accepted " + accepted + ", rejected " + rejected +
-      (missing ? ", missing " + missing : "");
-  }
-
-  function renderAssignments(rows) {
-    if (!rows.length) {
-      $("assignBody").innerHTML = '<tr><td colspan="8" class="muted">Nothing yet.</td></tr>';
-      return;
-    }
-    $("assignBody").innerHTML = rows.map(function (a) {
-      return "<tr>" +
-        '<td class="mono">' + esc(a.subject_key) + "</td>" +
-        "<td>" + esc(a.user) + "</td>" +
-        "<td>" + esc(a.role) + "</td>" +
-        '<td><span class="pill ' + esc(a.state) + '">' + esc(a.state) + "</span></td>" +
-        '<td class="nowrap muted">' + esc(shortTime(a.assigned_at)) + "</td>" +
-        '<td class="nowrap muted">' + esc(shortTime(a.submitted_at)) + "</td>" +
-        '<td class="muted">' + esc(verdictText(a)) + (a.stage_after ? " → " + esc(STAGE_TEXT[a.stage_after] || a.stage_after) : "") + "</td>" +
-        '<td class="right">' + (a.state === "assigned"
-          ? '<button data-act="release" data-id="' + esc(a.assignment_id) + '">Release</button>'
-          : "") + "</td></tr>";
-    }).join("");
-  }
-
-  function names(list) { return (list || []).join(", "); }
-
-  function renderLog(entries) {
-    if (!entries.length) {
-      $("logBody").innerHTML = '<tr><td colspan="5" class="muted">No activity yet.</td></tr>';
-      return;
-    }
-    $("logBody").innerHTML = entries.map(function (e) {
-      var detail = "";
-      if (e.kind === "submission") {
-        var parts = [];
-        if ((e.accepted_labels || []).length) { parts.push("accepted " + names(e.accepted_labels)); }
-        var rejected = Object.keys(e.rejected_labels || {}).filter(function (n) { return e.rejected_labels[n] !== "missing"; });
-        if (rejected.length) { parts.push("rejected " + rejected.join(", ")); }
-        if ((e.missing_labels || []).length) { parts.push("missing " + names(e.missing_labels)); }
-        if ((e.edited_labels || []).length) { parts.push("corrected " + names(e.edited_labels)); }
-        if ((e.removed_labels || []).length) { parts.push("removed " + names(e.removed_labels)); }
-        if (e.role === "editor" && !e.quality_check_confirmed) { parts.push("could not correct it"); }
-        detail = (e.role ? e.role + ": " : "") + (parts.join("; ") || "no label judged") +
-          " → " + (STAGE_TEXT[e.stage] || e.stage);
-        if (e.comment) { detail += " — " + e.comment; }
-      } else if (e.kind === "approved") {
-        detail = "written into the dataset" + (e.segmentation_written ? ", with the correction" : "");
-      } else if (e.kind === "returned") {
-        detail = "sent back to the " + (e.to === "edit" ? "editors" : "reviewers") + (e.comment ? " — " + e.comment : "");
-      } else if (e.kind === "closed") {
-        detail = "closed" + (e.comment ? " — " + e.comment : "");
-      } else if (e.kind === "assigned") {
-        detail = (e.role ? "as " + e.role + ", " : "") + "lease until " + shortTime(e.expires_at);
-      } else if (e.kind === "user_created" || e.kind === "user_updated") {
-        detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
-      } else if (e.key_prefix) {
-        detail = e.key_prefix + "…";
+            '<button class="danger" data-act="delete" data-name="' + esc(u.name) + '">Delete</button>' +
+            "</td></tr>";
+        }).join("");
       }
-      return "<tr>" +
-        '<td class="nowrap muted">' + esc(shortTime(e.timestamp)) + "</td>" +
-        "<td>" + esc(e.kind) + "</td>" +
-        '<td class="mono">' + esc(e.subject_key || "") + "</td>" +
-        "<td>" + esc(e.user || "") + "</td>" +
-        '<td class="muted">' + esc(detail) + "</td></tr>";
-    }).join("");
-  }
 
-  function fillConfig(cfg) {
-    config = cfg || {};
-    $("cfgEligible").value = (config.eligible_label_values || []).join(",");
-    $("cfgLease").value = config.lease_ttl_seconds;
-    $("cfgMax").value = config.max_concurrent_assignments_per_user;
-    $("cfgStrategy").value = config.assignment_strategy;
-    $("cfgEditsReview").checked = !!config.edits_need_review;
-    $("cfgNoSeg").checked = !!config.include_subjects_without_segmentation;
-    $("cfgRemoved").checked = !!config.mark_removed_labels_absent;
-    $("cfgGeometry").checked = !!config.require_geometry_match;
-    $("cfgBackups").checked = !!config.keep_segmentation_backups;
-  }
-
-  // --- data loading ---------------------------------------------------------
-  var refreshes = 0;
-
-  // Everything is fetched again after each action. Only the latest refresh is drawn: an earlier
-  // one answered late would otherwise show a subject where it no longer is.
-  function refreshAll() {
-    var refresh = ++refreshes;
-    var latest = function (render) {
-      return function (data) { if (refresh === refreshes) { render(data); } };
-    };
-    var state = $("stateFilter").value;
-    var stage = $("stageFilter").value;
-    return Promise.all([
-      api("GET", "/admin/api/stats").then(latest(renderStats)),
-      api("GET", "/admin/api/cases?limit=300" + (stage ? "&stage=" + stage : "")).then(latest(renderCases)),
-      api("GET", "/admin/api/users").then(latest(renderUsers)),
-      api("GET", "/admin/api/assignments?limit=100" + (state ? "&state=" + state : "")).then(latest(renderAssignments)),
-      api("GET", "/admin/api/submissions?limit=50").then(latest(renderLog))
-    ])["catch"](function (err) { showError(err.message); });
-  }
-
-  // --- actions --------------------------------------------------------------
-  $("refreshBtn").addEventListener("click", refreshAll);
-  $("stateFilter").addEventListener("change", refreshAll);
-  $("stageFilter").addEventListener("change", refreshAll);
-
-  $("reindexBtn").addEventListener("click", function () {
-    api("POST", "/admin/api/refresh-index", {})
-      .then(renderStats)["catch"](function (err) { showError(err.message); });
-  });
-
-  $("approveAllBtn").addEventListener("click", function () {
-    if (!window.confirm("Approve every subject waiting for approval? Their accepted labels and corrected " +
-        "segmentations are written into the dataset.")) { return; }
-    api("POST", "/admin/api/cases/approve", {}).then(function (body) {
-      var failed = body.results.filter(function (r) { return !r.approved; });
-      if (failed.length) {
-        showError(failed.length + " not approved: " + failed.map(function (r) { return r.subject_key + " (" + r.message + ")"; }).join("; "));
+      // What a verdict did, in a few words.
+      function verdictText(a) {
+        if (a.state !== "submitted") { return ""; }
+        if (a.role === "editor") {
+          if (!a.quality_check_confirmed) { return "sent to you"; }
+          var edited = (a.edited_labels || []).length;
+          var removed = (a.removed_labels || []).length;
+          return "corrected " + edited + (removed ? ", removed " + removed : "");
+        }
+        var accepted = (a.accepted_labels || []).length;
+        var missing = (a.missing_labels || []).length;
+        var rejected = Object.keys(a.rejected_labels || {}).length - missing;
+        return (a.quality_check_confirmed ? "" : "rejected the subject: ") + "accepted " + accepted + ", rejected " + rejected +
+          (missing ? ", missing " + missing : "");
       }
-      showOk(body.approved + " subject(s) approved and written into the dataset.");
-      return refreshAll();
-    })["catch"](function (err) { showError(err.message); });
-  });
 
-  // A subject's segmentation, fetched with the admin key and handed to the browser as a file.
-  function downloadSegmentation(key) {
-    fetch("/admin/api/cases/" + encodeURIComponent(key) + "/segmentation", { headers: { "X-Admin-Key": adminKey } })
-      .then(function (response) {
-        if (!response.ok) { throw new Error("The segmentation of " + key + " could not be downloaded (HTTP " + response.status + ")."); }
-        return response.blob();
-      })
-      .then(function (blob) {
-        var link = document.createElement("a");
-        link.href = URL.createObjectURL(blob);
-        link.download = key + ".seg.nrrd";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
-      })["catch"](function (err) { showError(err.message); });
-  }
+      function renderAssignments(rows) {
+        if (!rows.length) {
+          $("assignBody").innerHTML = '<tr><td colspan="8" class="muted">Nothing yet.</td></tr>';
+          return;
+        }
+        $("assignBody").innerHTML = rows.map(function (a) {
+          return "<tr>" +
+            '<td class="mono">' + esc(a.subject_key) + "</td>" +
+            "<td>" + esc(a.user) + "</td>" +
+            "<td>" + esc(a.role) + "</td>" +
+            '<td><span class="pill ' + esc(a.state) + '">' + esc(a.state) + "</span></td>" +
+            '<td class="nowrap muted">' + esc(shortTime(a.assigned_at)) + "</td>" +
+            '<td class="nowrap muted">' + esc(shortTime(a.submitted_at)) + "</td>" +
+            '<td class="muted">' + esc(verdictText(a)) + (a.stage_after ? " → " + esc(STAGE_TEXT[a.stage_after] || a.stage_after) : "") + "</td>" +
+            '<td class="right">' + (a.state === "assigned"
+              ? '<button data-act="release" data-id="' + esc(a.assignment_id) + '">Release</button>'
+              : "") + "</td></tr>";
+        }).join("");
+      }
 
-  $("casesBody").addEventListener("click", function (event) {
-    var button = event.target.closest("button[data-act]");
-    if (!button) { return; }
-    var key = button.getAttribute("data-key");
-    var path = "/admin/api/cases/" + encodeURIComponent(key);
-    var act = button.getAttribute("data-act");
-    var request = null;
-    if (act === "download") {
-      downloadSegmentation(key);
-      return;
-    } else if (act === "approve") {
-      request = api("POST", path + "/approve").then(function (body) { showOk(key + ": " + body.message); });
-    } else if (act === "to-review" || act === "to-edit") {
-      var to = act === "to-review" ? "review" : "edit";
-      var comment = window.prompt(to === "review"
-        ? "Send " + key + " back to the reviewers: every verdict is reviewed again. Comment (optional):"
-        : "Send " + key + " to the editors. What should they correct?", "");
-      if (comment === null) { return; }
-      request = api("POST", path + "/return", { to: to, comment: comment });
-    } else if (act === "close") {
-      var reason = window.prompt("Close " + key + " without writing anything into the dataset? It is not handed out " +
-        "again unless you send it back. Comment (optional):", "");
-      if (reason === null) { return; }
-      request = api("POST", path + "/close", { comment: reason });
-    }
-    if (request) {
-      button.disabled = true;
-      request.then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
-    }
-  });
+      function names(list) { return (list || []).join(", "); }
 
-  // The key goes after '#', which browsers never send to the server, so it stays out of logs.
-  function inviteLink(apiKey) {
-    return window.location.origin + "/review#key=" + encodeURIComponent(apiKey);
-  }
+      function renderLog(entries) {
+        if (!entries.length) {
+          $("logBody").innerHTML = '<tr><td colspan="5" class="muted">No activity yet.</td></tr>';
+          return;
+        }
+        $("logBody").innerHTML = entries.map(function (e) {
+          var detail = "";
+          if (e.kind === "submission") {
+            var parts = [];
+            if ((e.accepted_labels || []).length) { parts.push("accepted " + names(e.accepted_labels)); }
+            var rejected = Object.keys(e.rejected_labels || {}).filter(function (n) { return e.rejected_labels[n] !== "missing"; });
+            if (rejected.length) { parts.push("rejected " + rejected.join(", ")); }
+            if ((e.missing_labels || []).length) { parts.push("missing " + names(e.missing_labels)); }
+            if ((e.edited_labels || []).length) { parts.push("corrected " + names(e.edited_labels)); }
+            if ((e.removed_labels || []).length) { parts.push("removed " + names(e.removed_labels)); }
+            if (e.role === "editor" && !e.quality_check_confirmed) { parts.push("could not correct it"); }
+            detail = (e.role ? e.role + ": " : "") + (parts.join("; ") || "no label judged") +
+              " → " + (STAGE_TEXT[e.stage] || e.stage);
+            if (e.comment) { detail += " — " + e.comment; }
+          } else if (e.kind === "approved") {
+            detail = "written into the dataset" + (e.segmentation_written ? ", with the correction" : "");
+          } else if (e.kind === "returned") {
+            detail = "sent back to the " + (e.to === "edit" ? "editors" : "reviewers") + (e.comment ? " — " + e.comment : "");
+          } else if (e.kind === "closed") {
+            detail = "closed" + (e.comment ? " — " + e.comment : "");
+          } else if (e.kind === "assigned") {
+            detail = (e.role ? "as " + e.role + ", " : "") + "lease until " + shortTime(e.expires_at);
+          } else if (e.kind === "user_created" || e.kind === "user_updated") {
+            detail = [(e.roles || []).join(" + "), e.key_prefix ? e.key_prefix + "…" : ""].filter(Boolean).join(" · ");
+          } else if (e.key_prefix) {
+            detail = e.key_prefix + "…";
+          }
+          return "<tr>" +
+            '<td class="nowrap muted">' + esc(shortTime(e.timestamp)) + "</td>" +
+            "<td>" + esc(e.kind) + "</td>" +
+            '<td class="mono">' + esc(e.subject_key || "") + "</td>" +
+            "<td>" + esc(e.user || "") + "</td>" +
+            '<td class="muted">' + esc(detail) + "</td></tr>";
+        }).join("");
+      }
 
-  // How the key reaches the user depends on where they work: a reviewer gets an invite link to
-  // the review page, an editor enters the key in 3D Slicer.
-  function showKey(name, apiKey, roles) {
-    var reviewer = roles.indexOf("reviewer") !== -1;
-    var editor = roles.indexOf("editor") !== -1;
-    var help = ["Shown once only."];
-    if (reviewer) {
-      help.push("The invite link opens the review page with them signed in. It carries the key, so send it privately.");
-    }
-    if (editor) {
-      help.push("In 3D Slicer, they enter the key and the server URL, " + window.location.origin +
-        ", in the BoneHub Quality Check extension.");
-    }
-    $("newKeyName").textContent = name;
-    $("newKeyValue").textContent = apiKey;
-    $("newInviteValue").textContent = reviewer ? inviteLink(apiKey) : "";
-    $("newInviteValue").hidden = !reviewer;
-    $("copyInviteBtn").hidden = !reviewer;
-    $("newKeyHelp").textContent = help.join(" ");
-    $("newKeyBox").hidden = false;
-  }
+      function fillConfig(cfg) {
+        config = cfg || {};
+        $("cfgEligible").value = (config.eligible_label_values || []).join(",");
+        $("cfgLease").value = config.lease_ttl_seconds;
+        $("cfgMax").value = config.max_concurrent_assignments_per_user;
+        $("cfgStrategy").value = config.assignment_strategy;
+        $("cfgEditsReview").checked = !!config.edits_need_review;
+        $("cfgNoSeg").checked = !!config.include_subjects_without_segmentation;
+        $("cfgRemoved").checked = !!config.mark_removed_labels_absent;
+        $("cfgGeometry").checked = !!config.require_geometry_match;
+        $("cfgBackups").checked = !!config.keep_segmentation_backups;
+      }
 
-  function copyText(text, button) {
-    var done = function () {
-      var label = button.textContent;
-      button.textContent = "Copied";
-      window.setTimeout(function () { button.textContent = label; }, 1500);
-    };
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done, function () { showError("Copying failed; select the text instead."); });
-    } else {
-      showError("The browser allows copying only over HTTPS or on localhost; select the text instead.");
-    }
-  }
+      // --- data loading ---------------------------------------------------------
+      var refreshes = 0;
 
-  $("copyKeyBtn").addEventListener("click", function () { copyText($("newKeyValue").textContent, $("copyKeyBtn")); });
-  $("copyInviteBtn").addEventListener("click", function () {
-    copyText($("newInviteValue").textContent, $("copyInviteBtn"));
-  });
+      // Everything is fetched again after each action. Only the latest refresh is drawn: an earlier
+      // one answered late would otherwise show a subject where it no longer is.
+      function refreshAll() {
+        var refresh = ++refreshes;
+        var latest = function (render) {
+          return function (data) { if (refresh === refreshes) { render(data); } };
+        };
+        var state = $("stateFilter").value;
+        var stage = $("stageFilter").value;
+        return Promise.all([
+          api("GET", "/admin/api/stats").then(latest(renderStats)),
+          api("GET", "/admin/api/cases?limit=300" + (stage ? "&stage=" + stage : "")).then(latest(renderCases)),
+          api("GET", "/admin/api/users").then(latest(renderUsers)),
+          api("GET", "/admin/api/assignments?limit=100" + (state ? "&state=" + state : "")).then(latest(renderAssignments)),
+          api("GET", "/admin/api/submissions?limit=50").then(latest(renderLog))
+        ])["catch"](function (err) { showError(err.message); });
+      }
 
-  $("createBtn").addEventListener("click", function () {
-    var name = $("newName").value.trim();
-    if (!name) { showError("A user name is required."); return; }
-    var roles = [];
-    if ($("newReviewer").checked) { roles.push("reviewer"); }
-    if ($("newEditor").checked) { roles.push("editor"); }
-    api("POST", "/admin/api/users", {
-      name: name,
-      roles: roles,
-      allowed_dataset_ids: $("newDatasets").value.trim(),
-      data_access: $("newAccess").value,
-      note: $("newNote").value.trim()
-    }).then(function (result) {
-      showKey(result.user.name, result.api_key, result.user.roles);
-      $("newName").value = "";
-      $("newReviewer").checked = true;
-      $("newEditor").checked = true;
-      $("newDatasets").value = "";
-      $("newAccess").value = "image_and_segmentation";
-      $("newNote").value = "";
-      return refreshAll();
-    })["catch"](function (err) { showError(err.message); });
-  });
+      // --- actions --------------------------------------------------------------
+      $("refreshBtn").addEventListener("click", refreshAll);
+      $("stateFilter").addEventListener("change", refreshAll);
+      $("stageFilter").addEventListener("change", refreshAll);
 
-  // What a user is sent, and their roles, are changed in place. A change the server refuses --
-  // such as taking away a user's last role -- is undone by listing the users again.
-  $("usersBody").addEventListener("change", function (event) {
-    var target = event.target;
-    var act = target.getAttribute("data-act");
-    var body;
-    if (act === "access") {
-      body = { data_access: target.value };
-    } else if (act === "role") {
-      var boxes = target.closest("tr").querySelectorAll('input[data-act="role"]');
-      body = { roles: Array.prototype.filter.call(boxes, function (box) { return box.checked; })
-        .map(function (box) { return box.getAttribute("data-role"); }) };
-    } else {
-      return;
-    }
-    api("PATCH", "/admin/api/users/" + encodeURIComponent(target.getAttribute("data-name")), body)
-      .then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
-  });
+      $("reindexBtn").addEventListener("click", function () {
+        api("POST", "/admin/api/refresh-index", {})
+          .then(renderStats)["catch"](function (err) { showError(err.message); });
+      });
 
-  $("usersBody").addEventListener("click", function (event) {
-    var button = event.target.closest("button");
-    if (!button) { return; }
-    var name = button.getAttribute("data-name");
-    var act = button.getAttribute("data-act");
-
-    if (act === "rotate") {
-      if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
-      api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
-        .then(function (result) {
-          showKey(result.name, result.api_key, (usersByName[result.name] || {}).roles || []);
+      $("approveAllBtn").addEventListener("click", function () {
+        if (!window.confirm("Approve every subject waiting for approval? Their accepted labels and corrected " +
+          "segmentations are written into the dataset.")) { return; }
+        api("POST", "/admin/api/cases/approve", {}).then(function (body) {
+          var failed = body.results.filter(function (r) { return !r.approved; });
+          if (failed.length) {
+            showError(failed.length + " not approved: " + failed.map(function (r) { return r.subject_key + " (" + r.message + ")"; }).join("; "));
+          }
+          showOk(body.approved + " subject(s) approved and written into the dataset.");
           return refreshAll();
         })["catch"](function (err) { showError(err.message); });
-    } else if (act === "toggle") {
-      api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/active",
-          { active: button.getAttribute("data-active") === "true" })
-        .then(refreshAll)["catch"](function (err) { showError(err.message); });
-    } else if (act === "delete") {
-      if (!window.confirm("Delete user '" + name + "'? Their open subjects return to the queue.")) { return; }
-      api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
-        .then(refreshAll)["catch"](function (err) { showError(err.message); });
-    }
-  });
+      });
 
-  $("assignBody").addEventListener("click", function (event) {
-    var button = event.target.closest('button[data-act="release"]');
-    if (!button) { return; }
-    api("POST", "/admin/api/assignments/" + encodeURIComponent(button.getAttribute("data-id")) + "/release", {})
-      .then(refreshAll)["catch"](function (err) { showError(err.message); });
-  });
+      // A subject's segmentation, fetched with the admin key and handed to the browser as a file.
+      function downloadSegmentation(key) {
+        fetch("/admin/api/cases/" + encodeURIComponent(key) + "/segmentation", { headers: { "X-Admin-Key": adminKey } })
+          .then(function (response) {
+            if (!response.ok) { throw new Error("The segmentation of " + key + " could not be downloaded (HTTP " + response.status + ")."); }
+            return response.blob();
+          })
+          .then(function (blob) {
+            var link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+            link.download = key + ".seg.nrrd";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(function () { URL.revokeObjectURL(link.href); }, 10000);
+          })["catch"](function (err) { showError(err.message); });
+      }
 
-  $("saveCfgBtn").addEventListener("click", function () {
-    var eligible = $("cfgEligible").value.split(",")
-      .map(function (s) { return s.trim(); })
-      .filter(Boolean)
-      .map(Number);
-    api("PUT", "/admin/api/config", {
-      eligible_label_values: eligible,
-      lease_ttl_seconds: Number($("cfgLease").value),
-      max_concurrent_assignments_per_user: Number($("cfgMax").value),
-      assignment_strategy: $("cfgStrategy").value,
-      edits_need_review: $("cfgEditsReview").checked,
-      include_subjects_without_segmentation: $("cfgNoSeg").checked,
-      mark_removed_labels_absent: $("cfgRemoved").checked,
-      require_geometry_match: $("cfgGeometry").checked,
-      keep_segmentation_backups: $("cfgBackups").checked
-    }).then(function (cfg) {
-      fillConfig(cfg);
-      var msg = $("cfgMsg");
-      msg.textContent = "Policy saved and the dataset re-scanned.";
-      msg.hidden = false;
-      window.setTimeout(function () { msg.hidden = true; }, 4000);
-      return refreshAll();
-    })["catch"](function (err) { showError(err.message); });
-  });
+      $("casesBody").addEventListener("click", function (event) {
+        var button = event.target.closest("button[data-act]");
+        if (!button) { return; }
+        var key = button.getAttribute("data-key");
+        var path = "/admin/api/cases/" + encodeURIComponent(key);
+        var act = button.getAttribute("data-act");
+        var request = null;
+        if (act === "download") {
+          downloadSegmentation(key);
+          return;
+        } else if (act === "approve") {
+          request = api("POST", path + "/approve").then(function (body) { showOk(key + ": " + body.message); });
+        } else if (act === "to-review" || act === "to-edit") {
+          var to = act === "to-review" ? "review" : "edit";
+          var comment = window.prompt(to === "review"
+            ? "Send " + key + " back to the reviewers: every verdict is reviewed again. Comment (optional):"
+            : "Send " + key + " to the editors. What should they correct?", "");
+          if (comment === null) { return; }
+          request = api("POST", path + "/return", { to: to, comment: comment });
+        } else if (act === "close") {
+          var reason = window.prompt("Close " + key + " without writing anything into the dataset? It is not handed out " +
+            "again unless you send it back. Comment (optional):", "");
+          if (reason === null) { return; }
+          request = api("POST", path + "/close", { comment: reason });
+        }
+        if (request) {
+          button.disabled = true;
+          request.then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
+        }
+      });
 
-  // --- boot -----------------------------------------------------------------
-  var stored = null;
-  try { stored = window.sessionStorage.getItem(KEY_STORAGE); } catch (e) { stored = null; }
-  if (stored) {
-    signIn(stored)["catch"](function () {
-      adminKey = null;
-      try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
-    });
-  }
-}());
-</script>
+      // The key goes after '#', which browsers never send to the server, so it stays out of logs.
+      function inviteLink(apiKey) {
+        return window.location.origin + "/review#key=" + encodeURIComponent(apiKey);
+      }
+
+      // How the key reaches the user depends on where they work: a reviewer gets an invite link to
+      // the review page, an editor enters the key in 3D Slicer.
+      function showKey(name, apiKey, roles) {
+        var reviewer = roles.indexOf("reviewer") !== -1;
+        var editor = roles.indexOf("editor") !== -1;
+        var help = ["Shown once only."];
+        if (reviewer) {
+          help.push("The invite link opens the review page with them signed in. It carries the key, so send it privately.");
+        }
+        if (editor) {
+          help.push("In 3D Slicer, they enter the key and the server URL, " + window.location.origin +
+            ", in the BoneHub Quality Check extension.");
+        }
+        $("newKeyName").textContent = name;
+        $("newKeyValue").textContent = apiKey;
+        $("newInviteValue").textContent = reviewer ? inviteLink(apiKey) : "";
+        $("newInviteValue").hidden = !reviewer;
+        $("copyInviteBtn").hidden = !reviewer;
+        $("newKeyHelp").textContent = help.join(" ");
+        $("newKeyBox").hidden = false;
+      }
+
+      function copyText(text, button) {
+        var done = function () {
+          var label = button.textContent;
+          button.textContent = "Copied";
+          window.setTimeout(function () { button.textContent = label; }, 1500);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done, function () { showError("Copying failed; select the text instead."); });
+        } else {
+          showError("The browser allows copying only over HTTPS or on localhost; select the text instead.");
+        }
+      }
+
+      $("copyKeyBtn").addEventListener("click", function () { copyText($("newKeyValue").textContent, $("copyKeyBtn")); });
+      $("copyInviteBtn").addEventListener("click", function () {
+        copyText($("newInviteValue").textContent, $("copyInviteBtn"));
+      });
+
+      $("createBtn").addEventListener("click", function () {
+        var name = $("newName").value.trim();
+        if (!name) { showError("A user name is required."); return; }
+        var roles = [];
+        if ($("newReviewer").checked) { roles.push("reviewer"); }
+        if ($("newEditor").checked) { roles.push("editor"); }
+        api("POST", "/admin/api/users", {
+          name: name,
+          roles: roles,
+          allowed_dataset_ids: $("newDatasets").value.trim(),
+          data_access: $("newAccess").value,
+          note: $("newNote").value.trim()
+        }).then(function (result) {
+          showKey(result.user.name, result.api_key, result.user.roles);
+          $("newName").value = "";
+          $("newReviewer").checked = true;
+          $("newEditor").checked = true;
+          $("newDatasets").value = "";
+          $("newAccess").value = "image_and_segmentation";
+          $("newNote").value = "";
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+      });
+
+      // What a user is sent, and their roles, are changed in place. A change the server refuses --
+      // such as taking away a user's last role -- is undone by listing the users again.
+      $("usersBody").addEventListener("change", function (event) {
+        var target = event.target;
+        var act = target.getAttribute("data-act");
+        var body;
+        if (act === "access") {
+          body = { data_access: target.value };
+        } else if (act === "role") {
+          var boxes = target.closest("tr").querySelectorAll('input[data-act="role"]');
+          body = {
+            roles: Array.prototype.filter.call(boxes, function (box) { return box.checked; })
+              .map(function (box) { return box.getAttribute("data-role"); })
+          };
+        } else {
+          return;
+        }
+        api("PATCH", "/admin/api/users/" + encodeURIComponent(target.getAttribute("data-name")), body)
+          .then(refreshAll)["catch"](function (err) { showError(err.message); return refreshAll(); });
+      });
+
+      $("usersBody").addEventListener("click", function (event) {
+        var button = event.target.closest("button");
+        if (!button) { return; }
+        var name = button.getAttribute("data-name");
+        var act = button.getAttribute("data-act");
+
+        if (act === "rotate") {
+          if (!window.confirm("Issue a new key for '" + name + "'? The current key stops working immediately.")) { return; }
+          api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/rotate-key", {})
+            .then(function (result) {
+              showKey(result.name, result.api_key, (usersByName[result.name] || {}).roles || []);
+              return refreshAll();
+            })["catch"](function (err) { showError(err.message); });
+        } else if (act === "toggle") {
+          api("POST", "/admin/api/users/" + encodeURIComponent(name) + "/active",
+            { active: button.getAttribute("data-active") === "true" })
+            .then(refreshAll)["catch"](function (err) { showError(err.message); });
+        } else if (act === "delete") {
+          if (!window.confirm("Delete user '" + name + "'? Their open subjects return to the queue.")) { return; }
+          api("DELETE", "/admin/api/users/" + encodeURIComponent(name))
+            .then(refreshAll)["catch"](function (err) { showError(err.message); });
+        }
+      });
+
+      $("assignBody").addEventListener("click", function (event) {
+        var button = event.target.closest('button[data-act="release"]');
+        if (!button) { return; }
+        api("POST", "/admin/api/assignments/" + encodeURIComponent(button.getAttribute("data-id")) + "/release", {})
+          .then(refreshAll)["catch"](function (err) { showError(err.message); });
+      });
+
+      $("saveCfgBtn").addEventListener("click", function () {
+        var eligible = $("cfgEligible").value.split(",")
+          .map(function (s) { return s.trim(); })
+          .filter(Boolean)
+          .map(Number);
+        api("PUT", "/admin/api/config", {
+          eligible_label_values: eligible,
+          lease_ttl_seconds: Number($("cfgLease").value),
+          max_concurrent_assignments_per_user: Number($("cfgMax").value),
+          assignment_strategy: $("cfgStrategy").value,
+          edits_need_review: $("cfgEditsReview").checked,
+          include_subjects_without_segmentation: $("cfgNoSeg").checked,
+          mark_removed_labels_absent: $("cfgRemoved").checked,
+          require_geometry_match: $("cfgGeometry").checked,
+          keep_segmentation_backups: $("cfgBackups").checked
+        }).then(function (cfg) {
+          fillConfig(cfg);
+          var msg = $("cfgMsg");
+          msg.textContent = "Policy saved and the dataset re-scanned.";
+          msg.hidden = false;
+          window.setTimeout(function () { msg.hidden = true; }, 4000);
+          return refreshAll();
+        })["catch"](function (err) { showError(err.message); });
+      });
+
+      // --- boot -----------------------------------------------------------------
+      var stored = null;
+      try { stored = window.sessionStorage.getItem(KEY_STORAGE); } catch (e) { stored = null; }
+      if (stored) {
+        signIn(stored)["catch"](function () {
+          adminKey = null;
+          try { window.sessionStorage.removeItem(KEY_STORAGE); } catch (e) { /* ignore */ }
+        });
+      }
+    }());
+  </script>
 </body>
+
 </html>

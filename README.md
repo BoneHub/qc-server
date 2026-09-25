@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="qc_server/static/logo.svg" alt="BoneHub Quality Check logo" height="480">
+</p>
+
 # BoneHub Quality Check — Server
 
 This server runs a human quality check of the segmentations in a
